@@ -1,0 +1,23 @@
+skills:
+  schema-markup:
+    capabilities:
+      is_review: true
+    category: review
+    description: JSON-LD schema markup implementation for rich results and AI visibility.
+    name: schema-markup
+    prompt:
+      directives:
+      - "Use JSON-LD only \u2014 not Microdata or RDFa"
+      - Article schema for blog posts with author, datePublished, dateModified, headline
+      - LocalBusiness schema tying content to the business entity
+      - FAQ schema for any Q&A sections (earns featured snippets and LLM citations)
+      - BreadcrumbList schema for navigation signals
+      - Never add schema for content not actually on the page
+      - "Required fields must be present \u2014 missing them blocks rich results"
+      - Match schema content to visible page content exactly
+    tags:
+    - seo
+    - schema
+    - structured-data
+    - json-ld
+    version: 1.0.0

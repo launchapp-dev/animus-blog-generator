@@ -1,0 +1,651 @@
+# ──────────────────────────────────────────────────────────────
+# blog-engine.yaml — Automated SEO blog pipeline
+# ──────────────────────────────────────────────────────────────
+# Generates SEO-optimized blog posts end-to-end:
+#   topic research → data collection → writing → SEO audit →
+#   image generation → social excerpts → publish
+#
+# Before running, complete setup:
+#   1. Copy .env.example to .env and fill in your API keys
+#   2. Run the setup wizard:  ao workflow run setup
+#      (or manually create business-context.yaml — see README)
+# ──────────────────────────────────────────────────────────────
+
+tools_allowlist:
+- git
+- gh
+- bash
+- WebSearch
+- WebFetch
+
+# ── MCP Server Definitions ────────────────────────────────────
+
+mcp_servers:
+  ao:
+    command: ao
+    args:
+    - mcp
+    - serve
+  exa:
+    command: npx
+    args:
+    - -y
+    - exa-mcp-server
+    env:
+      EXA_API_KEY: ${EXA_API_KEY}
+  tavily:
+    command: npx
+    args:
+    - -y
+    - tavily-mcp
+    env:
+      TAVILY_API_KEY: ${TAVILY_API_KEY}
+  brave:
+    command: npx
+    args:
+    - -y
+    - '@anthropic/brave-search-mcp'
+    env:
+      BRAVE_API_KEY: ${BRAVE_API_KEY}
+  firecrawl:
+    command: npx
+    args:
+    - -y
+    - firecrawl-mcp-server
+    env:
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY}
+  google-maps:
+    command: npx
+    args:
+    - -y
+    - google-maps-mcp-server
+    env:
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
+  search-console:
+    command: npx
+    args:
+    - -y
+    - search-console-mcp
+    env:
+      GSC_CLIENT_EMAIL: ${GSC_CLIENT_EMAIL}
+      GSC_PRIVATE_KEY: ${GSC_PRIVATE_KEY}
+  replicate:
+    command: npx
+    args:
+    - -y
+    - replicate-mcp
+    env:
+      REPLICATE_API_TOKEN: ${REPLICATE_API_TOKEN}
+  perplexity:
+    command: npx
+    args:
+    - -y
+    - '@perplexity/modelcontextprotocol'
+    env:
+      PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY}
+  # ── Publishing (bring your own CMS) ──────────────────────────
+  # To publish directly to your CMS, add an MCP server here.
+  # Example for a custom blog MCP server:
+  #
+  #   blog:
+  #     command: node
+  #     args:
+  #     - ./scripts/blog-mcp-server.js
+  #     env:
+  #       DATABASE_URL: ${DATABASE_URL}
+  #       STORAGE_BUCKET: ${STORAGE_BUCKET}
+  #
+  # Then uncomment the publish phase in the blog-production workflow below.
+
+# ── Agent Profiles ────────────────────────────────────────────
+
+agents:
+  content-strategist:
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers:
+    - ao
+    - exa
+    - tavily
+    - brave
+    - firecrawl
+    - search-console
+    system_prompt: |
+      SKILLS: Read and follow .ao/skills/content-strategy.md
+      CONTEXT: Read business-context.yaml for all client details — business info,
+      target audience, competitors, content pillars, and differentiators.
+
+      Use Animus tools (ao.task.create, ao.queue.enqueue) for urgent news topics.
+
+  content-researcher:
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers:
+    - firecrawl
+    - exa
+    - tavily
+    - brave
+    - google-maps
+
+  content-writer:
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers: []
+    system_prompt: |
+      SKILLS: Read and follow .ao/skills/content-production.md,
+      .ao/skills/ai-seo.md, .ao/skills/content-humanizer.md
+      CONTEXT: Read business-context.yaml for client details and voice guidelines.
+
+      Write in the voice defined in business-context.yaml. Use the perspective,
+      tone, and style specified there. Reference specific locations and details
+      relevant to the business's market area.
+
+      CONTENT RULES: Get to the point in 3-4 sentences. All claims need citations.
+      Target readability >= 70. Structure for scannability — headers, bullets, tables.
+      Include Q&A sections for LLM extractability. Use specific numbers with sources.
+      Include "As of [date]..." for recency signals.
+
+      SEO: Target keyword in title, first paragraph, one H2, meta description.
+      Keyword density 0.5-1.5%. Internal links to 2-3 related blog posts.
+      First paragraph answers the core query directly (featured snippet).
+
+      Output: markdown with frontmatter (title, slug, meta_description, date,
+      author, keywords, schema_type, content_pillar, target_keyword, word_count,
+      featuredImage, excerpt, seoTitle, seoDescription).
+
+  seo-optimizer:
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers:
+    - search-console
+    - firecrawl
+    system_prompt: |
+      SKILLS: Read and follow .ao/skills/seo-audit.md,
+      .ao/skills/schema-markup.md, .ao/skills/ai-seo.md
+
+      SEO AUDIT CHECKLIST:
+      - Target keyword in title, first paragraph, at least one H2, meta description
+      - Keyword density 0.5-1.5%
+      - Meta description under 155 characters with CTA
+      - Title under 60 characters
+      - Internal links to 2-3 related blog posts (not service pages)
+      - No AI cliche words
+      - Readability grade 8-10
+
+      SCHEMA MARKUP: Ensure JSON-LD for Article, LocalBusiness, FAQ sections.
+
+      AI CITABILITY: Content structured as extractable chunks — definitions,
+      numbered steps, comparison tables, FAQs, attributed statistics.
+      Named entities (people, places, organizations) not generics.
+
+  asset-generator:
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers:
+    - replicate
+    system_prompt: |
+      SKILLS: Read and follow .ao/skills/social-content.md
+      CONTEXT: Read business-context.yaml for brand voice and social media guidelines.
+
+      SOCIAL CONTENT RULES:
+      - Instagram: short, emoji-friendly, 5-10 hashtags, hook-first
+      - Facebook: conversational, end with question to drive comments
+      - LinkedIn: professional, data-forward, insight-led
+      - Adapt per platform — never copy-paste across channels
+
+  performance-analyst:
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers:
+    - ao
+    - search-console
+    - exa
+    - perplexity
+    system_prompt: |
+      SKILLS: Read and follow .ao/skills/ai-seo.md
+      CONTEXT: Read business-context.yaml for business details and content pillars.
+
+  content-refresher:
+    model: claude-opus-4-6
+    tool: claude
+    mcp_servers:
+    - firecrawl
+    system_prompt: |
+      SKILLS: Read and follow .ao/skills/content-production.md,
+      .ao/skills/ai-seo.md, .ao/skills/content-humanizer.md
+      CONTEXT: Read business-context.yaml for client details and voice guidelines.
+
+      Same voice and content rules as the content-writer.
+      Focus on updating statistics, prices, rates, and time-sensitive claims.
+      Maintain the original unique angle while incorporating competitor improvements.
+      Structure for AI citability — extractable chunks, attributed statistics, Q&A.
+      No AI cliche words. Vary sentence length. Include opinions.
+
+# ── Phase Definitions ─────────────────────────────────────────
+
+phases:
+  # --- Blog Production phases ---
+  topic-research:
+    mode: agent
+    agent: content-strategist
+    directive: |
+      Pick ONE blog topic for this run. Read business-context.yaml for the
+      business niche, content pillars, and competitor list. Then:
+
+      1. Analyze Search Console for striking-distance keywords
+      2. Scan market/industry data for timely news
+      3. Check competitor blogs for content gaps
+      4. Mine Reddit/forums for real questions in this niche
+
+      Select the highest-priority topic considering:
+      time-sensitive content first, then striking-distance keywords,
+      then content gaps, then pillar balance.
+
+      If this run was triggered with a schedule input specifying a
+      preferred_pillar, weight topics in that pillar higher.
+
+      Output: a single topic brief with target keyword, content pillar,
+      word count target, unique angle, data sources needed, and internal
+      link targets.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - topic_brief
+      fields:
+        topic_brief:
+          type: object
+          description: Single topic brief selected for this run
+        target_keyword:
+          type: string
+          description: Primary SEO target keyword
+        content_pillar:
+          type: string
+          description: Which pillar this topic belongs to
+
+  research-collection:
+    mode: agent
+    agent: content-researcher
+    directive: |
+      Using the topic brief from the prior phase, gather all source
+      material. Scrape publicly available data sources via Firecrawl:
+      industry reports, market summaries, government records, census data.
+      Get location info from Google Maps if relevant. Search via Exa,
+      Tavily, and Brave for additional data points, competitor coverage,
+      and real questions.
+
+      Output a structured research package with primary data, source
+      URLs, key quotes, data tables, and local context. Always cite
+      the source for any statistic.
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - research_package
+      fields:
+        research_package:
+          type: object
+          description: All source material needed for the content writer
+        source_count:
+          type: integer
+          description: Number of sources consulted
+
+  content-writing:
+    mode: agent
+    agent: content-writer
+    directive: |
+      Write the full blog post as a markdown file using the topic brief
+      and research package from prior phases. Follow the voice rules and
+      SEO rules in your system prompt exactly.
+
+      The post is a .md file with YAML frontmatter including:
+      title, slug, meta_description, date, author, keywords, schema_type,
+      content_pillar, target_keyword, word_count, featuredImage (leave empty),
+      excerpt, seoTitle, seoDescription.
+
+      Save the file to content/<slug>.md in this repo. Do NOT commit yet —
+      the next phase handles that.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - slug
+      fields:
+        slug:
+          type: string
+          description: The post slug (filename without .md)
+        word_count:
+          type: integer
+          description: Final word count of the post body
+        target_keyword:
+          type: string
+          description: The primary SEO target keyword
+
+  commit-draft:
+    mode: command
+    directive: Commit the blog post draft (exit 1 OK if already committed)
+    command:
+      program: bash
+      args:
+      - -c
+      - "git add content/ assets/ && git diff --cached --quiet && echo 'nothing to commit' || git commit -m 'Add blog post draft'"
+      cwd_mode: task_root
+      timeout_secs: 30
+
+  seo-review:
+    mode: agent
+    agent: seo-optimizer
+    directive: |
+      Audit and fix the blog post in content/<slug>.md. Fix ALL issues
+      yourself — do not send back for rework.
+
+      Work efficiently:
+      - Estimate character counts, do not count one by one
+      - Make all edits in a single pass, then commit
+      - If keyword density is low, add 3-5 natural mentions and move on
+
+      Checklist:
+      - Target keyword in title, first paragraph, at least one H2, meta description
+      - Keyword density 0.5-1.5%
+      - Internal links to 2-3 related blog posts (not service pages)
+      - Meta description under 155 characters with CTA
+      - Title under 60 characters
+      - No AI cliche words
+      - Readability: grade 8-10
+
+      Edit the file directly, then commit with message describing fixes.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: implementation_result
+      required_fields:
+      - commit_message
+      fields:
+        seo_score:
+          type: integer
+          description: SEO quality score 0-100 after fixes
+        fixes_applied:
+          type: array
+          description: List of fixes applied
+          items:
+            type: string
+
+  asset-generation:
+    mode: agent
+    agent: asset-generator
+    directive: |
+      Generate a featured image for the blog post using the Replicate API.
+      Use model: google/nano-banana-pro
+
+      1. Read content/<slug>.md to understand the topic
+      2. Read business-context.yaml for the business niche and aesthetic
+      3. Craft a detailed image prompt. Style: professional photography
+         relevant to the business niche, natural lighting,
+         no text overlays or watermarks.
+      4. Call create_models_predictions with model_owner="google",
+         model_name="nano-banana-pro", input={ prompt: "...", aspect_ratio: "16:9" }
+      5. Poll get_predictions until status is "succeeded"
+      6. Download the output image and save to assets/<slug>.webp
+      7. Update the post frontmatter featuredImage field
+      8. Commit with message
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: implementation_result
+      required_fields:
+      - commit_message
+
+  social-excerpts:
+    mode: agent
+    agent: asset-generator
+    directive: |
+      Generate social media excerpts for the blog post. Read the post
+      from content/<slug>.md and create platform-specific content:
+
+      Save to content/<slug>.social.md with sections for Instagram,
+      Facebook, and LinkedIn. Follow the social content rules in your
+      system prompt. Commit with message.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: implementation_result
+      required_fields:
+      - commit_message
+
+  push-branch:
+    mode: command
+    directive: Push the branch to origin
+    command:
+      program: git
+      args:
+      - push
+      - -u
+      - origin
+      - HEAD
+      cwd_mode: task_root
+      timeout_secs: 60
+
+  # --- Publish phase (bring your own CMS) ---
+  # Uncomment and configure once you've added a blog MCP server above.
+  #
+  # publish:
+  #   mode: agent
+  #   agent: asset-generator
+  #   directive: |
+  #     Publish the blog post to the CMS using the blog MCP server.
+  #
+  #     The blog MCP server exposes tools for publishing. Call:
+  #       mcp__blog__blog({ command: "help" })
+  #     to discover available commands and their parameters.
+  #
+  #     Then:
+  #     1. Publish the post from content/<slug>.md using the publish command.
+  #        Pass the full markdown content (including frontmatter).
+  #     2. Upload the featured image from assets/<slug>.webp using the
+  #        upload_image command if the image exists.
+  #
+  #     Commit all changes and push the branch to origin.
+  #   capabilities:
+  #     mutates_state: true
+
+  # --- Refresh Cycle phases ---
+  performance-analysis:
+    mode: agent
+    agent: performance-analyst
+    directive: |
+      Generate the content performance report. Pull Search Console
+      data for all published posts, analyze ranking changes, identify
+      the single most impactful post to refresh (declining traffic,
+      competitor overtook us, or ranking for keywords it doesn't
+      cover well). Check LLM citation status via Perplexity.
+
+      If no post needs refresh, set verdict to skip.
+      If a post needs refresh, output the post path and refresh plan.
+
+      Also: if keyword gaps are found (topics with zero coverage),
+      create tasks via ao.task.create for future blog-production runs.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - report
+      fields:
+        report:
+          type: object
+          description: Performance report with metrics and recommendations
+        refresh_target:
+          type: string
+          description: File path of the post to refresh, or null if none needed
+    decision_contract:
+      min_confidence: 0.5
+      max_risk: low
+      allow_missing_decision: false
+
+  content-refresh-write:
+    mode: agent
+    agent: content-refresher
+    directive: |
+      Refresh the post identified in the prior phase. Update statistics,
+      prices, rates, and time-sensitive claims with current data from
+      Firecrawl scrapes. If a competitor outranks us, analyze their
+      improvements via Firecrawl and incorporate them while maintaining
+      our unique angle. Update dateModified in frontmatter. Commit changes.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: implementation_result
+      required_fields:
+      - commit_message
+      fields:
+        sections_updated:
+          type: array
+          description: Which sections were refreshed
+          items:
+            type: string
+
+  refresh-seo-review:
+    mode: agent
+    agent: seo-optimizer
+    directive: |
+      Re-audit the refreshed post. Fix any issues inline and commit:
+      - Verify updated data is present
+      - Keyword positioning maintained
+      - dateModified updated in frontmatter
+      - All standard SEO checks pass (see system prompt)
+      Edit and commit fixes directly.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: implementation_result
+      required_fields:
+      - commit_message
+
+  # --- Image Refresh phases ---
+  image-regen:
+    mode: agent
+    agent: asset-generator
+    directive: |
+      Regenerate the featured image for an existing blog post using Nano Banana Pro.
+
+      1. Read the blog post from content/<slug>.md (the slug is in the task description)
+      2. Read business-context.yaml for the business niche and aesthetic
+      3. Craft a detailed image prompt based on the post content.
+         Style: professional photography relevant to the niche,
+         natural lighting. No text overlays, watermarks, or AI artifacts.
+      4. Call create_models_predictions with model_owner="google",
+         model_name="nano-banana-pro", input={ prompt: "...", aspect_ratio: "16:9" }
+      5. Poll get_predictions until status is "succeeded"
+      6. Download the output image and save to assets/<slug>.webp (overwrite existing)
+      7. Update the post frontmatter featuredImage field if needed
+      8. Commit with descriptive message
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: implementation_result
+      required_fields:
+      - commit_message
+
+  image-push:
+    mode: command
+    directive: Push the branch with updated image
+    command:
+      program: git
+      args:
+      - push
+      - -u
+      - origin
+      - HEAD
+      cwd_mode: task_root
+      timeout_secs: 60
+
+  # --- Market/Industry News phase ---
+  news-scan:
+    mode: agent
+    agent: content-strategist
+    directive: |
+      Scan for breaking news relevant to the business niche.
+      Read business-context.yaml for the industry, location, and
+      topics to monitor. Check via Brave/Exa for:
+      industry regulatory changes, major market moves, policy changes,
+      new developments, and other material events.
+
+      If a material event is detected:
+      1. Create a task via ao.task.create with type=feature, priority=high
+      2. Enqueue it via ao.queue.enqueue with workflow_ref="blog-production"
+
+      If nothing material, emit a skip verdict. Do NOT create tasks
+      for routine activity.
+    capabilities:
+      mutates_state: true
+    decision_contract:
+      min_confidence: 0.5
+      max_risk: low
+      allow_missing_decision: false
+
+# ── Workflow Definitions ──────────────────────────────────────
+
+workflows:
+- id: blog-production
+  name: Blog Post Production
+  description: Discover topic, research, write, optimize, generate assets
+  phases:
+  - topic-research
+  - research-collection
+  - content-writing
+  - commit-draft
+  - seo-review
+  - asset-generation
+  - social-excerpts
+  - push-branch
+  # - publish  # Uncomment after configuring a blog MCP server
+
+- id: refresh-cycle
+  name: Refresh Cycle
+  description: Analyze performance, refresh declining post, re-optimize
+  phases:
+  - performance-analysis
+  - content-refresh-write
+  - refresh-seo-review
+  - push-branch
+  # - publish  # Uncomment after configuring a blog MCP server
+
+- id: image-refresh
+  name: Image Refresh
+  description: Regenerate featured image for an existing blog post
+  phases:
+  - image-regen
+  - image-push
+
+- id: news-monitor
+  name: Industry News Monitor
+  description: Daily scan for breaking news, enqueues blog-production if material
+  phases:
+  - news-scan
+
+# ── Schedules ─────────────────────────────────────────────────
+# Adjust cron expressions and preferred pillars to match your
+# publishing cadence. Pillar names must match business-context.yaml.
+
+schedules:
+- id: blog-primary
+  cron: "0 8 * * 2"
+  workflow_ref: blog-production
+  enabled: true
+  input:
+    preferred_pillar: ""  # Set to a pillar name from business-context.yaml
+- id: blog-secondary
+  cron: "0 8 * * 4"
+  workflow_ref: blog-production
+  enabled: true
+  input:
+    preferred_pillar: ""  # Set to a different pillar name
+- id: refresh
+  cron: "0 8 * * 3"
+  workflow_ref: refresh-cycle
+  enabled: true
+- id: news
+  cron: "0 6 * * *"
+  workflow_ref: news-monitor
+  enabled: true

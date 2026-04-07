@@ -1,0 +1,19 @@
+# Secrets
+.env
+
+# AO runtime
+.ao/logs/
+.ao/sync.json
+
+# macOS
+.DS_Store
+
+# Editor
+*.swp
+*.swo
+*~
+.vscode/
+.idea/
+
+# Node
+node_modules/

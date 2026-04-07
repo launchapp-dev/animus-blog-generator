@@ -1,0 +1,6 @@
+workflows:
+  - id: standard-workflow
+    name: Standard Workflow
+    description: Default task delivery workflow for this repository.
+    phases:
+      - workflow_ref: ao.task/standard

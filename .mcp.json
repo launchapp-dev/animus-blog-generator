@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "ao": {
+      "command": "ao",
+      "args": ["mcp", "serve"]
+    }
+  }
+}

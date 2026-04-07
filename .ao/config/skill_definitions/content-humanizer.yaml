@@ -1,0 +1,27 @@
+skills:
+  content-humanizer:
+    capabilities:
+      is_review: true
+    category: review
+    description: Make AI-generated content read like a human expert wrote it.
+    name: content-humanizer
+    prompt:
+      directives:
+      - "Vary sentence length dramatically \u2014 short punchy sentences mixed with\
+        \ longer nuanced ones"
+      - Include colloquialisms and regional language appropriate to the market
+      - "Reference personal experiences and opinions \u2014 \"I think...\", \"In my\
+        \ experience...\""
+      - Add parenthetical asides and conversational tangents
+      - "No AI cliche words \u2014 delve, landscape, navigate, leverage, ever-evolving,\
+        \ tapestry, realm, foster, moreover, furthermore, utilize"
+      - "Avoid uniform paragraph length \u2014 mix short 1-2 sentence paragraphs with\
+        \ longer ones"
+      - Include specific anecdotes that only someone with real experience would know
+      - "Opinions are required \u2014 take a position, don't hedge everything"
+    tags:
+    - content
+    - humanize
+    - voice
+    - anti-ai-detection
+    version: 1.0.0

@@ -1,0 +1,25 @@
+skills:
+  content-strategy:
+    capabilities:
+      is_research: true
+      mutates_state: true
+    category: research
+    description: Content strategy for topic discovery, pillar planning, and gap analysis.
+    name: content-strategy
+    prompt:
+      directives:
+      - Before planning content, gather business context, audience, and competitive
+        landscape
+      - Deliver 3-5 content pillars with rationale and subtopic clusters
+      - Prioritize topics by type (searchable/shareable), keyword opportunity, and
+        buyer stage
+      - Flag missing content plans, low traffic despite content, and content lacking
+        keyword targets
+      - Surface competitor gap analysis and quick wins
+      - Use confidence tagging for recommendations
+    tags:
+    - content
+    - strategy
+    - seo
+    - planning
+    version: 1.0.0

@@ -1,0 +1,25 @@
+skills:
+  social-content:
+    capabilities:
+      writes_files: true
+    category: implementation
+    description: Platform-specific social media content from blog posts.
+    name: social-content
+    prompt:
+      directives:
+      - "Instagram \u2014 short, visual-first, emoji-friendly, 5-10 relevant hashtags"
+      - "Facebook \u2014 conversational, end with a question to drive comments"
+      - "LinkedIn \u2014 professional, data-forward, insight-led"
+      - "Hooks first \u2014 use curiosity, story, value, or contrarian angles"
+      - "Adapt content per platform \u2014 never copy-paste the same text across all\
+        \ channels"
+      - Keep sales content under 20% of total posts
+      - "Include repurposing strategy \u2014 one blog post becomes multiple platform-specific\
+        \ posts"
+    tags:
+    - social
+    - content
+    - instagram
+    - facebook
+    - linkedin
+    version: 1.0.0
