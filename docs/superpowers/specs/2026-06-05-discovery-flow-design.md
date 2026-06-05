@@ -6,9 +6,9 @@
 
 ## Summary
 
-Extend the existing blog generator (`.ao/workflows/custom.yaml`) with an upstream **idea-discovery → human-review → approved-ticket → blog-production** pipeline. New workflows poll an audio-transcript MCP (Krisp; portable to Granola), synthesize blog ideas grounded in business context and external SEO research, file them as Linear tickets for human review, then detect approval and hand off to a variant of the existing blog pipeline.
+Extend the existing blog generator (`.ao/workflows/custom.yaml`) with an upstream **idea-discovery → human-review → approved-ticket → blog-production** pipeline. New workflows poll an audio-transcript MCP (Krisp; portable to Granola), synthesize blog ideas grounded in business context and external SEO research, file them as Linear tickets in a dedicated project for human review, then detect approval and hand off to a variant of the existing blog pipeline.
 
-The human-review gate lives in Linear: tickets begin in `Backlog` with a `Discovery` label, and moving out of `Backlog` is the approval signal.
+The human-review gate lives in Linear: tickets begin in a **configured Linear project's Backlog** (e.g., a "Blog Content" or "Editorial" project — exact name set in `.env` / business-context as `LINEAR_DISCOVERY_PROJECT_ID`) with a `Discovery` label, and moving out of `Backlog` *within that project* is the approval signal. Scoping to a specific project prevents unrelated team activity from polluting either side of the loop and lets the editorial workflow have its own custom states without interfering with engineering/product Linear usage.
 
 ## Goals
 
@@ -109,9 +109,10 @@ Krisp is the primary; the design works equally with Granola if `krisp` is swappe
      - Firecrawl: spot-scrape top 1–2 ranking pages for what's already said and 2–3 citable authoritative sources
   4. Filter or refine angles based on research: drop dead keywords, re-angle saturated SERPs, drop dupes against manifest + content-library.
   5. For each surviving angle, call Linear MCP to create an issue:
-     - Project: configured
+     - **Project: `LINEAR_DISCOVERY_PROJECT_ID`** (configured — must be set; strategist refuses to proceed if missing)
+     - Team: derived from the project (Linear projects belong to a team)
      - Label: `Discovery`
-     - State: `Backlog`
+     - State: `Backlog` *within the configured project*
      - Body: structured markdown — source transcript ref + timestamp, the inspiring quote, suggested target keyword + GSC stats, competitive landscape (top 3 URLs + gap), pre-identified citable sources, suggested pillar, dedup notes
      - Idempotency: include a client dedup key `discovery:<transcript_id>:<angle_hash>` in the body so retries don't double-create
 - **Capabilities:** `mutates_state: true`
@@ -123,7 +124,9 @@ Krisp is the primary; the design works equally with Granola if `krisp` is swappe
 - **mcp_servers:** `ao`, `linear`
 - **Per-run directive:**
   1. Read `.ao/state/approval-seen.json` (list of already-handled issue IDs).
-  2. Linear GraphQL query: `issues where label.name = "Discovery" AND state.type != "backlog"`.
+  2. Linear GraphQL query, **scoped to the configured project**:
+     `issues where project.id = LINEAR_DISCOVERY_PROJECT_ID AND label.name = "Discovery" AND state.type != "backlog"`.
+     The project scope is mandatory — without it the watcher would respond to status changes anywhere in the workspace.
   3. Subtract the seen set.
   4. For each newly-approved issue, call `animus_queue_enqueue` with:
      ```
@@ -333,9 +336,10 @@ Bootstrapping: if missing, `register-post` creates `{"version": 1, "posts": []}`
 ## Open questions / configuration to confirm at implementation time
 
 1. The actual registered names of `krisp`, `linear`, `content-library` MCP servers in `.mcp.json`.
-2. Linear project ID / team and the exact state names ("In Progress", "In Review", "Backlog") in the target project — these may differ from defaults.
-3. Whether Animus v0.4.2 supports a phase-level or workflow-level `on_failure` hook for `linear-coordinator`'s error path. If not, the design degrades gracefully to human re-approval as the recovery path.
-4. Whether `register-post` should also write to the `content-library` MCP (push), or whether the content-library is read-only from this repo's perspective and ingests from `content/` separately.
+2. **`LINEAR_DISCOVERY_PROJECT_ID`** — the Linear project ID (UUID) where Discovery tickets live. Set in `.env` and referenced from the workflow YAML / agent directives. The project must exist before first run; the strategist and approval-watcher both refuse to proceed without it.
+3. The exact Linear state names within that project: which state means "Backlog" (initial), which means "In Progress" (active), which means "In Review" (branch ready), which means "Done" (published). These may not match Linear defaults if the project has custom states. Configured as `LINEAR_STATE_BACKLOG_ID`, `LINEAR_STATE_IN_PROGRESS_ID`, `LINEAR_STATE_IN_REVIEW_ID`, `LINEAR_STATE_DONE_ID`.
+4. Whether Animus v0.4.2 supports a phase-level or workflow-level `on_failure` hook for `linear-coordinator`'s error path. If not, the design degrades gracefully to human re-approval as the recovery path.
+5. Whether `register-post` should also write to the `content-library` MCP (push), or whether the content-library is read-only from this repo's perspective and ingests from `content/` separately.
 
 ## Reference — relevant Animus skills
 
