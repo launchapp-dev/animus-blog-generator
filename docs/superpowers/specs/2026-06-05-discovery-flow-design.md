@@ -148,22 +148,26 @@ Linear is a subject backend, not an MCP server. Two new MCP servers are added to
 - **Model:** `claude-sonnet-4-6`
 - **mcp_servers:** `ao`, `content-library`, `search-console`, `exa`, `tavily`, `brave`, `firecrawl`
 - **System prompt:** mandatory `business-context.yaml`; refuses without `LINEAR_DISCOVERY_PROJECT_ID`
-- **Per-run directive:** for each transcript: extract 3–5 angles → external-validate (Search Console + Exa/Tavily/Brave + Firecrawl spot-scrape) → filter dupes (manifest + content-library) → for each surviving angle: check for existing subject with matching idempotency key, else `animus subject create --kind linear --title "..." --description "<structured body with idempotency key>"`. **After all surviving angles for a transcript are created-or-confirmed-duplicate, advance `.ao/state/discovery-cursor.json` per-transcript.**
+- **Per-run directive:** for each transcript: extract 3–5 angles → external-validate (Search Console + Exa/Tavily/Brave + Firecrawl spot-scrape) → filter dupes (manifest + content-library) → for each surviving angle: check for existing subject with matching idempotency key, else `animus subject create --kind linear --title "..." --body "<structured body with idempotency key>"` (CLI flag is `--body`, not `--description`). **After all surviving angles for a transcript are created-or-confirmed-duplicate, advance `.ao/state/discovery-cursor.json` per-transcript.**
 
 ### `approval-watcher` (new)
 
 - **Model:** `claude-haiku-4-5`
 - **mcp_servers:** `ao`
 - **Per-run directive:**
-  1. Read `.ao/state/approval-seen.json`.
-  2. `animus subject list --kind linear --status in_progress` (scoped to `LINEAR_DISCOVERY_PROJECT_ID` via the backend's project filter).
-  3. Subtract seen set. Note: `cancelled`, `done`, `blocked`, `ready` are not even queried.
-  4. **Queue handoff (verified contract):** for each newly-approved subject, the queue dispatches Animus tasks (or requirements, or custom-title subjects) — not Linear-backed subjects directly. Two viable shapes (preflight picks one):
-     - **Shape A (task wrapper):** `animus task create --title "<title>" --description "<linear_subject_id stored in description>" ` → capture `task_id` → `animus queue enqueue --task-id <task_id> --workflow-ref blog-from-ticket --input-json '{"linear_subject_id": "<id>"}'`
+  1. Read `.ao/state/approval-seen.json` (schema: `{ "issues": [{ "subject_id": "...", "last_approved_at": "ISO8601" }], "updated_at": "..." }`).
+  2. `animus subject list --kind linear --status in_progress --json`. **Capture each subject's transition-timestamp field** (preflight Step 6.5 resolved which field is exposed: `state_updated_at`, `stateUpdatedAt`, or fallback `updated_at`).
+  3. **Project scoping (explicit, not assumed):** if preflight Step 6.5 confirmed that the backend's `config.project_id` does NOT filter the generic-CLI results, post-filter the returned list to keep only subjects where `project_id == LINEAR_DISCOVERY_PROJECT_ID`. If backend scoping is confirmed active, skip this step. Fallback if the generic CLI cannot be project-scoped at all: use `animus plugin call --name animus-subject-linear --method subject.list --params '{"project_id":"...","status":"in_progress"}'`.
+  4. Subtract using `(subject_id, transition_timestamp)` dedup: for each candidate, find the matching seen entry by `subject_id`; if absent → enqueue; if `seen.last_approved_at < subject.transition_ts` → enqueue + overwrite (this is a re-approval after a failed run); if `seen.last_approved_at >= subject.transition_ts` → skip. Note `cancelled`, `done`, `blocked`, `ready` are never queried in step 2.
+  5. **Queue handoff:** for each enqueue-eligible subject, the queue dispatches Animus tasks (or requirements, or ad-hoc title subjects) — not Linear-backed subjects directly. There is **no `animus task` subcommand in v0.5.4**; tasks are subjects of `--kind task`. Two viable shapes (preflight Step 6 picks one):
+     - **Shape A (task-subject wrapper):**
+       `TASK_ID=$(animus subject create --kind task --title "<title>" --body "<linear_subject_id stored in body>" --status ready --json | jq -r '.data.id')`
+       → `animus queue enqueue --task-id "$TASK_ID" --workflow-ref blog-from-ticket --input-json '{"linear_subject_id": "<id>"}'`
+       (note: `animus subject create` uses `--body`; `animus queue enqueue` uses `--description` for the ad-hoc form — the two CLIs have different flag names)
      - **Shape B (ad-hoc):** `animus queue enqueue --title "<title>" --description "<linear_subject_id>" --workflow-ref blog-from-ticket --input-json '{"linear_subject_id": "<id>"}'`
      Preflight verifies which propagates `--input-json` through to the dispatched workflow's first phase.
-  5. Append IDs to `.ao/state/approval-seen.json` atomically.
-  6. If nothing new, emit `skip`.
+  6. **Update seen set atomically:** for every successfully-enqueued subject, overwrite (or append) the entry `{ subject_id, last_approved_at: subject.transition_ts }`. Write via tmpfile + rename.
+  7. If nothing new, emit `skip`.
 
 ### `linear-coordinator` (new, two phases)
 

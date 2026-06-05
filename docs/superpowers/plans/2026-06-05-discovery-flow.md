@@ -38,7 +38,9 @@
 
 ## Task -2: Migrate the blog pipeline to `.animus/workflows/custom.yaml`
 
-The active config path resolved by `animus workflow config get` is `.animus/workflows/`. The existing blog pipeline lives at `.ao/workflows/custom.yaml` (legacy v0.4.x path) and is not loaded by the v0.5.4 daemon — `animus workflow list` currently returns `[]`. Migration is a precondition.
+The active config path resolved by `animus workflow config get` is `.animus/workflows/` (verifiable via `animus workflow config get --json | jq -r .data.path`). The existing blog pipeline lives at `.ao/workflows/custom.yaml`, a legacy v0.4.x path that the v0.5.4 daemon does not load. Migration is a precondition.
+
+(`animus workflow definitions list` would also surface the gap — it shows only the bundled standard/hotfix/research workflows pre-migration, none of the project's blog workflows. The `config get` path resolution is the more direct evidence.)
 
 **Files:**
 - Move/overwrite: `.animus/workflows/custom.yaml` (currently a 5-line stub)
@@ -50,14 +52,43 @@ The active config path resolved by `animus workflow config get` is `.animus/work
 ```bash
 cat .animus/workflows/custom.yaml
 ```
-Expected: 5-line stub (`default_workflow_ref: standard-workflow`, `tools_allowlist: [cargo]`). We will overwrite this; no semantic loss.
+Expected: 5-line stub:
+```yaml
+default_workflow_ref: standard-workflow
 
-- [ ] **Step 2: Copy the blog pipeline into `.animus/workflows/custom.yaml`**
+tools_allowlist:
+  - cargo
+```
+
+**Decisions about what to preserve from the stub:**
+- `default_workflow_ref: standard-workflow` — **preserve**. It only matters for ad-hoc `animus workflow run` calls without an explicit `--workflow-ref`; harmless for the blog pipeline which dispatches via cron schedules with explicit refs.
+- `tools_allowlist: [cargo]` — **drop**. Clearly a Rust-template artifact (this is not a Rust project). The migrated `.ao/workflows/custom.yaml` brings its own `tools_allowlist: [git, gh, bash, WebSearch, WebFetch]` which is the correct set for this project.
+
+- [ ] **Step 2: Copy the blog pipeline into `.animus/workflows/custom.yaml`, preserving `default_workflow_ref`**
 
 ```bash
+# Copy the blog pipeline
 cp .ao/workflows/custom.yaml .animus/workflows/custom.yaml
 ```
-Expected: `.animus/workflows/custom.yaml` is now the full blog pipeline content.
+
+Then prepend `default_workflow_ref: standard-workflow` if it isn't already in the .ao copy. Verify via:
+
+```bash
+grep -c "default_workflow_ref:" .animus/workflows/custom.yaml
+```
+
+If the count is 0, add the line at the very top of the file (above the existing comment header):
+```yaml
+default_workflow_ref: standard-workflow
+
+# ──────────────────────────────────────────────────────────────
+# blog-engine.yaml — Automated SEO blog pipeline
+# ...
+```
+
+If the count is 1+, the line is already there from the .ao source; no action.
+
+**Note:** the `tools_allowlist: [cargo]` from the stub is intentionally NOT preserved — the blog pipeline's own allowlist supersedes it.
 
 - [ ] **Step 3: Compile and verify**
 
@@ -242,9 +273,34 @@ grep -i "on_failure\|failure_hook" ~/.claude/skills/animus-workflow-authoring/SK
 ```
 Record whether failure hooks are documented. If yes, `linear-coordinator` will register one in Task 5. If no, the plan falls back to daemon logs being the failure surface.
 
-- [ ] **Step 9: Resolve Krisp + content-library MCP package names**
+- [ ] **Step 9: Inventory existing Krisp + content-library MCP configuration (non-blocking)**
 
-Ask the user (or check existing notes) for the actual registered package names. Until known, these stay as placeholders that block Task 1.
+Per the project constraint, we are **not** installing new MCP servers as part of this work. Krisp is "already loaded" elsewhere and content-library is assumed to exist as a custom server the user maintains. The task here is to inventory what's already configured, not to discover packages.
+
+Check existing config locations in priority order:
+
+```bash
+# 1. The current .mcp.json (session-level Claude config)
+jq '.mcpServers | keys[]' .mcp.json
+
+# 2. The migrated .animus/workflows/custom.yaml (post-Task -2)
+grep -E "^\s+(krisp|content-library|granola):" .animus/workflows/custom.yaml
+
+# 3. Any user-level Animus daemon config
+find ~/.animus -name "*.yaml" -o -name "*.json" 2>/dev/null \
+  | xargs grep -l "krisp\|content-library" 2>/dev/null
+```
+
+Record:
+- **Krisp:** `<command + args + env from wherever it's already configured>` OR `not yet configured — Task 1 leaves a TODO stub`
+- **Content-library:** same
+
+**This step does NOT block Task 1.** If the MCPs aren't pre-configured:
+- Task 1 still adds the workflow YAML's `mcp_servers:` declarations as **TODO stubs** with `# TODO: replace with real command` comments.
+- The discovery and idea-strategist phases will fail-fast at runtime with a clear MCP-unavailable error, but every other piece of the architecture (subject backend, queue handoff, blog-from-ticket, manifest, retry semantics) lands and works.
+- The user wires up the MCPs at their own pace; no work in this plan blocks on it.
+
+If the MCPs ARE pre-configured elsewhere, copy the working `command` / `args` / `env` block into Task 1's `mcp_servers:` declarations.
 
 - [ ] **Step 10: Record preflight outcomes**
 
@@ -341,29 +397,46 @@ git commit -m "Bootstrap discovery-flow state dir, env vars, manifest"
 **Files:**
 - Modify: `.animus/workflows/custom.yaml`
 
-- [ ] **Step 1: Add `krisp` and `content-library` to `mcp_servers:`**
+- [ ] **Step 1: Add `krisp` and `content-library` to `mcp_servers:` (using existing config if available; TODO stubs otherwise)**
 
-In `.animus/workflows/custom.yaml`'s existing `mcp_servers:` block, after the `perplexity:` entry, insert:
+In `.animus/workflows/custom.yaml`'s existing `mcp_servers:` block, after the `perplexity:` entry, insert one of two forms based on preflight Step 9 outcome:
+
+**Form A — pre-configured elsewhere:** copy the verified `command` / `args` / `env` block:
 
 ```yaml
   krisp:
-    command: npx
+    command: <verified command, e.g. npx>
     args:
-    - -y
-    - <KRISP_PACKAGE_NAME>          # from preflight Step 9
+    - <verified args>
     env:
-      KRISP_API_KEY: ${KRISP_API_KEY}
+      <verified env keys/values>
   content-library:
-    command: npx
+    command: <verified command>
     args:
-    - -y
-    - <CONTENT_LIBRARY_PACKAGE_NAME>  # from preflight Step 9
+    - <verified args>
     env:
-      CONTENT_LIBRARY_URL: ${CONTENT_LIBRARY_URL}
-      CONTENT_LIBRARY_TOKEN: ${CONTENT_LIBRARY_TOKEN}
+      <verified env keys/values>
+```
+
+**Form B — not yet configured (TODO stubs):** install MCPs are not part of this work, but the YAML still declares the names so workflows that reference them compile cleanly. Stub form:
+
+```yaml
+  krisp:
+    # TODO: replace with actual krisp MCP command/args/env once configured.
+    # Discovery workflow phases will skip at runtime until this is real.
+    command: "true"     # placeholder that always exits 0; phases referencing this MCP will fail-fast clearly
+    args: []
+    env: {}
+  content-library:
+    # TODO: same — replace with actual content-library MCP command/args/env.
+    command: "true"
+    args: []
+    env: {}
 ```
 
 **Do NOT add a `linear:` MCP server.** Linear access is via the subject backend.
+
+**Rationale:** the discovery and idea-strategist phases are the only consumers of `krisp` and `content-library`. With TODO stubs, those phases fail fast with a clear "MCP server `true` exited" error — but the rest of the architecture (subject backend, queue handoff, blog-from-ticket pipeline, manifest, retry semantics) lands and works on the existing `blog-production` flow, which doesn't touch these MCPs. The user can wire up Krisp / content-library at their own pace without re-running this plan.
 
 - [ ] **Step 2: Add the `subjects:` block (verified list shape with `backend:`)**
 
@@ -1798,6 +1871,15 @@ git commit -m "Document discovery flow + animus-subject-linear setup + daemon-en
 | R2-P1-3 | Project scoping not actually enforced by generic CLI | Added preflight Step 6.5 to verify whether the backend's `config.project_id` actually scopes generic-CLI results, and to capture which transition-timestamp field is exposed. If backend scoping is missing, watcher post-filters by `project_id == LINEAR_DISCOVERY_PROJECT_ID` (Task 4 directive Step 3). |
 | R2-P2-1 | Subject-create CLI uses `--body`, not `--description` | Replaced throughout. Note: `animus queue enqueue` does use `--description` (different CLI) — this distinction is called out explicitly in Task -1 Step 6. |
 | R2-P2-2 | Used `animus workflow list` where definitions intended | Replaced with `animus workflow definitions list` in Task -2 Step 3 + Step 6 and Task 11 Step 3 + Task 13 Step 4. `workflow list` (runtime runs) kept only where actually checking runs. |
+
+### Round 3 (propagation + scope discipline)
+
+| # | Finding | Resolution |
+|---|---|---|
+| R3-P1-a | Spec's strategist + watcher directives still showed `--description`, removed `animus task create`, backend-only project scoping, plain "Append IDs" | Spec strategist directive now uses `--body`; spec watcher directive rewrites to: `(subject_id, transition_ts)` dedup, explicit project post-filter with plugin-call fallback, `animus subject create --kind task` for the wrapper path, atomic update via tmpfile + rename. All four stale fragments now match the plan and the verified CLI. |
+| R3-P1-b | MCP package names blocked preflight, conflicting with "we don't install MCPs as part of this" | Task -1 Step 9 rewritten to "inventory existing config, non-blocking." Task 1 supports both pre-configured form (copy verified `command`/`args`/`env`) and TODO-stub form (`command: "true"`) so the rest of the architecture lands even if Krisp / content-library aren't wired yet. The phases that depend on those MCPs fail fast at runtime; everything else (subject backend, queue, retries, blog-from-ticket pipeline) works on the existing `blog-production` flow. |
+| R3-P2 | Migration claimed "no semantic loss" but stub had `default_workflow_ref` + `tools_allowlist` | Task -2 Step 1 now lists the stub's contents explicitly and the migration decision per key: `default_workflow_ref: standard-workflow` is **preserved** (harmless; only matters for ad-hoc runs without explicit `--workflow-ref`); `tools_allowlist: [cargo]` is **dropped** as a Rust-template artifact, replaced by the blog pipeline's own `[git, gh, bash, WebSearch, WebFetch]` allowlist. |
+| R3-P3 | Migration rationale cited `animus workflow list` as evidence | Task -2 preamble rewritten to cite `animus workflow config get --json | jq -r .data.path` as the direct evidence that the active config root is `.animus/workflows/`. `workflow definitions list` is noted as a secondary indicator. `workflow list` is no longer cited anywhere as evidence. |
 
 ---
 
