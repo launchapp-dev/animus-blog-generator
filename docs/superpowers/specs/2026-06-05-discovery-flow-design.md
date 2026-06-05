@@ -1,29 +1,32 @@
 # Discovery Flow — Design Spec
 
-**Date:** 2026-06-05
+**Date:** 2026-06-05 (revised after v0.5.4 upgrade)
 **Branch:** `feature/discovery-flow`
 **Author:** Rafal + Claude
 
 ## Summary
 
-Extend the existing blog generator (`.ao/workflows/custom.yaml`) with an upstream **idea-discovery → human-review → approved-ticket → blog-production** pipeline. New workflows poll an audio-transcript MCP (Krisp; portable to Granola), synthesize blog ideas grounded in business context and external SEO research, file them as Linear tickets in a dedicated project for human review, then detect approval and hand off to a variant of the existing blog pipeline.
+Extend the existing blog generator (`.ao/workflows/custom.yaml`) with an upstream **idea-discovery → human-review → approved-ticket → blog-production** pipeline. New workflows poll an audio-transcript MCP (Krisp; portable to Granola), synthesize blog ideas grounded in business context and external SEO research, file them as **Linear-backed Animus subjects** in a dedicated Linear project for human review, then detect approval and hand off to a variant of the existing blog pipeline.
 
-The human-review gate lives in Linear: tickets begin in a **configured Linear project's Backlog** (e.g., a "Blog Content" or "Editorial" project — exact name set in `.env` / business-context as `LINEAR_DISCOVERY_PROJECT_ID`) with a `Discovery` label, and moving out of `Backlog` *within that project* is the approval signal. Scoping to a specific project prevents unrelated team activity from polluting either side of the loop and lets the editorial workflow have its own custom states without interfering with engineering/product Linear usage.
+**Architectural note (revised):** Linear is integrated as an **Animus subject backend** via the `animus-subject-linear` plugin (v0.1.4+, requires Animus v0.4.0+; this project is on v0.5.4). Linear is **not** treated as a generic MCP server. This makes Linear issues first-class Animus subjects that the queue, task, and workflow systems route over natively, eliminating the need for hand-written GraphQL queries or MCP shim layers.
+
+**Approval semantics:** the `animus-subject-linear` plugin auto-maps Linear's `WorkflowState.type` to the five Animus subject statuses (`Ready / InProgress / Blocked / Done / Cancelled`). The human-review gate is therefore: subjects are created at `status = Ready` (Linear state-type `backlog`); a human moves the issue to any Linear state with type `started` (e.g. "In Progress", "Todo+", "Reviewing") → plugin reports `status = InProgress` → approval-watcher enqueues. Linear states with type `cancelled` (Canceled, Won't-do, Duplicate) become Animus `Cancelled` and are explicitly filtered out — they are not approvals. Linear team-side state renames don't break the loop because the `type` field is stable.
 
 ## Goals
 
 1. **Transcript-grounded discovery** — blog ideas come from real conversations recorded in Krisp, not arbitrary topic mining.
-2. **Pre-validated proposals** — every Linear ticket already carries Search Console viability data, competitive landscape, and pre-identified citable sources, so human review is meaningful.
-3. **Closed-loop Linear status** — the Linear board is the system of record for blog state (`Backlog` = idea, `In Progress` = generating, `In Review` = branch ready, `Done` = merged).
+2. **Pre-validated proposals** — every Linear-backed subject already carries Search Console viability data, competitive landscape, and pre-identified citable sources, so human review is meaningful.
+3. **Closed-loop Linear status** — the Linear board is the visible system-of-record for blog state; status transitions are observed by Animus through the subject backend, not via custom polling code.
 4. **Local content manifest** — `content/manifest.json` records every published post; consumed by the strategist for local dedup and by the writer/SEO agents for real internal-link selection.
 5. **Reuse existing pipeline** — research, write, SEO, asset, social, push phases are reused unchanged; only a new `ticket-to-brief` phase replaces today's `topic-research`.
 
 ## Non-goals
 
 - Replacing or rewriting the existing `blog-production`, `refresh-cycle`, `image-refresh`, or `news-monitor` workflows.
-- Building a custom webhook receiver. Linear status detection is implemented as a polling workflow on a 15-minute cron.
+- Building a custom webhook receiver. Status detection is implemented as a polling workflow on a 15-minute cron (the plugin's roadmap includes webhooks; until shipped, we poll).
 - Auto-merging the generated branch into `main`. Merge is a human action in Linear/GitHub.
 - Implementing the `content-library` MCP server itself — this design assumes it is already registered and exposes search/list/get over the org's content + artifact database.
+- Granular Linear-state-name transitions from `linear-finalize` — the subject API only exposes the 5 normalized statuses. The default is to leave the issue at `InProgress` after finalize and let the human move it to their team's preferred "In Review" / "QA" / etc. state; an opt-in flag allows automatic transition to `Done`.
 
 ## Architecture overview
 
@@ -33,55 +36,95 @@ Three new workflows, two shared state files, one new manifest:
 ┌─────────────────────┐   cron: 0 7 * * *   (daily 7am)
 │  idea-discovery     │
 │                     │   phase 1: transcript-fetch
-│                     │   phase 2: idea-strategist (creates Linear issues)
+│                     │   phase 2: idea-strategist (creates Linear-backed subjects)
 └─────────────────────┘
 
-         ↓ (human reviews Linear backlog, moves chosen tickets out of Backlog)
+         ↓ (human reviews Linear backlog, moves chosen issues to a "started" state)
 
-┌─────────────────────┐   cron: */15 * * * * (every 15 min)
+┌─────────────────────┐   cron: */15 * * * *   (every 15 min)
 │  approval-watch     │
-│                     │   phase 1: approval-watcher (enqueues blog-from-ticket
-│                     │              for each newly-approved ticket)
+│                     │   phase 1: approval-watcher
+│                     │     - lists subjects of kind=linear, project=DISCOVERY
+│                     │     - filters by Animus status == InProgress
+│                     │     - skips Cancelled / Done / Blocked
+│                     │     - enqueues blog-from-ticket with {subject_id} only
 └─────────────────────┘
 
-         ↓ (queue handoff via animus_queue_enqueue)
+         ↓ (queue handoff via animus_queue_enqueue, kind=linear, id=<subject_id>)
 
 ┌─────────────────────┐
-│  blog-from-ticket   │   triggered per approved ticket
+│  blog-from-ticket   │   triggered per approved subject
 │                     │
-│   1. ticket-acknowledge   ← linear-coordinator: comment + state → In Progress
-│   2. ticket-to-brief      ← content-strategist: Linear → topic_brief
+│   1. ticket-acknowledge   ← linear-coordinator: post "started" comment
+│   2. ticket-to-brief      ← content-strategist: re-fetch subject + body,
+│                                                  derive topic_brief
 │   3. research-collection  ← content-researcher (reused)
 │   4. content-writing      ← content-writer (extended: content-library)
 │   5. commit-draft         ← command (reused)
 │   6. seo-review           ← seo-optimizer (extended: content-library)
-│   7. register-post        ← command: append content/manifest.json
-│   8. asset-generation     ← asset-generator (reused)
-│   9. social-excerpts      ← asset-generator (reused)
-│  10. push-branch          ← command (reused)
-│  11. linear-finalize      ← linear-coordinator: comment + state → In Review
+│   7. asset-generation     ← asset-generator (reused)
+│   8. social-excerpts      ← asset-generator (reused)
+│   9. push-branch          ← command (reused)
+│  10. register-post        ← agent: append content/manifest.json (post is now
+│                                    complete + pushed; manifest represents
+│                                    "post artifact on origin")
+│  11. linear-finalize      ← linear-coordinator: rich completion comment;
+│                                                  status transition opt-in
 └─────────────────────┘
 
-Shared state (.ao/state/, gitignored):
-  discovery-cursor.json    last-processed Krisp transcript ID
-  approval-seen.json       Linear issue IDs already enqueued
+Shared state (.ao/state/, gitignored entirely; no .gitkeep — phases mkdir on demand):
+  discovery-cursor.json    last *processed* transcript (advanced by idea-strategist,
+                           NOT by transcript-fetch — fail-safe against partial runs)
+  approval-seen.json       Animus subject IDs already enqueued
   transcripts/<id>.json    fetched transcript staging files
 
 Tracked in repo:
-  content/manifest.json    canonical list of all generated posts
+  content/manifest.json    canonical list of all generated posts (committed at the
+                           register-post step, AFTER push-branch — the manifest
+                           represents posts that exist on origin)
 ```
 
-`blog-production` is retrofitted with a single new phase (`register-post`, inserted between `seo-review` and `asset-generation`) so cron-originated posts also appear in the manifest. No other change to existing workflows.
+`blog-production` is retrofitted with a single new `register-post` phase, inserted as the new step 9 (between `push-branch` and the end, i.e., last phase). No other change to existing workflows.
 
-## New MCP servers
+## Subject backend (Linear)
 
-Added to the `mcp_servers:` block in `.ao/workflows/custom.yaml`. Names are placeholders for the actual registered server identifiers in `.mcp.json`.
+**Plugin:** `launchapp-dev/animus-subject-linear` v0.1.4+, installed via `animus plugin install launchapp-dev/animus-subject-linear`.
+
+**Status mapping (auto, no team-side configuration required):**
+
+| Linear `WorkflowState.type` | Animus subject status | Meaning in this workflow |
+|---|---|---|
+| `triage`, `backlog`, `unstarted` | `Ready` | initial state — created by strategist, awaiting human review |
+| `started` | `InProgress` | **approval signal** — human picked this idea |
+| `completed` | `Done` | blog published / merged (optional terminal transition) |
+| `cancelled` | `Cancelled` | rejected; never treated as approval |
+
+`LINEAR_STATUS_MAP` env override is available if the team's Linear states don't fit the type-based map (e.g. a custom "Code Review" state that should count as `Done` rather than `InProgress`).
+
+**Workflow YAML declaration:**
+
+```yaml
+subjects:
+  linear-discovery:
+    plugin: animus-subject-linear
+    config:
+      api_token_env: LINEAR_API_TOKEN
+      team: ${LINEAR_TEAM}
+      project_id: ${LINEAR_DISCOVERY_PROJECT_ID}
+```
+
+The local alias `linear-discovery` is what workflow phases reference (rather than the global plugin name) — this lets a single Animus instance host multiple Linear subject types for different projects/teams.
+
+**How agents interact with subjects:** the exact tool surface (whether `animus_subject_create` / `animus_subject_list` / etc. exist as MCP tools, or whether dispatch happens via `animus plugin call --name animus-subject-linear ...` from Bash) is **the first thing the preflight task verifies before any YAML changes are written**. The plan documents both paths and lets the preflight pick the right one. See the implementation plan for details.
+
+## MCP servers (non-Linear)
+
+Linear is no longer in this list — it's a subject backend, not an MCP server. The two new MCP servers below are added to the `mcp_servers:` block in `.ao/workflows/custom.yaml`.
 
 | Server | Purpose | Used by |
 |---|---|---|
 | `krisp` | Pull recent meeting transcripts | `transcript-collector` only |
-| `linear` | Issue create/read/update + state transitions | `idea-strategist`, `approval-watcher`, `content-strategist` (ticket-to-brief), `linear-coordinator` |
-| `content-library` | Search org content + artifact database | `idea-strategist`, `content-strategist`, `content-writer`, `seo-optimizer` |
+| `content-library` | Search org content + artifact database | `idea-strategist`, `content-strategist` (ticket-to-brief), `content-writer`, `seo-optimizer` |
 
 Krisp is the primary; the design works equally with Granola if `krisp` is swapped for `granola` in the workflow YAML — the `transcript-collector` directive is written in terms of "list new transcripts since cursor, fetch full text," not Krisp-specific tool names.
 
@@ -92,136 +135,133 @@ Krisp is the primary; the design works equally with Granola if `krisp` is swappe
 - **Model:** `claude-haiku-4-5` (fetch-only, no synthesis)
 - **mcp_servers:** `krisp`
 - **System prompt:** none beyond defaults; the directive is fully prescriptive
-- **Per-run directive:** read `.ao/state/discovery-cursor.json`, list Krisp transcripts created after the cursor, fetch full text and metadata for each, write each as `.ao/state/transcripts/<transcript_id>.json`, update the cursor to the most recent transcript ID. Emit phase result listing the file paths.
+- **Per-run directive:** read `.ao/state/discovery-cursor.json` to determine cutoff (treat missing as "process all available, cap 20"). List Krisp transcripts created strictly after `cursor.last_processed_at`. For each, fetch full text and metadata, write as `.ao/state/transcripts/<transcript_id>.json` (mkdir parent if needed). **Does NOT update the cursor** — that responsibility moves to `idea-strategist` so the cursor reflects what was actually *processed* not just *fetched*. Emit phase result with the list of file paths.
 - **Output contract:** `phase_result` with required field `transcript_paths: array<string>`
 
 ### `idea-strategist` (new)
 
 - **Model:** `claude-sonnet-4-6`
-- **mcp_servers:** `ao`, `linear`, `content-library`, `search-console`, `exa`, `tavily`, `brave`, `firecrawl`
-- **System prompt:** reads `.ao/skills/content-strategy.md`; reads `business-context.yaml` as mandatory context (refuses to proceed without it)
+- **mcp_servers:** `ao`, `content-library`, `search-console`, `exa`, `tavily`, `brave`, `firecrawl`
+- **System prompt:** reads `.ao/skills/content-strategy.md`; reads `business-context.yaml` as mandatory context (refuses to proceed without it). Hard rule: requires `LINEAR_DISCOVERY_PROJECT_ID` set; emits skip with reason `missing_project_id` otherwise.
 - **Per-run directive:**
-  1. Read business context, manifest (`content/manifest.json`), and query `content-library` MCP for org-wide topic fingerprints.
+  1. Read business context, manifest (`content/manifest.json`), query `content-library` for org-wide topic fingerprints.
   2. For each transcript file in input: extract 3–5 candidate angles grounded in specific quoted moments.
-  3. For each candidate angle, run external validation:
-     - Search Console: target keyword viability (volume, current rank, striking distance)
-     - Exa / Tavily / Brave: competitive landscape — who covers this, how deep, what's the gap
-     - Firecrawl: spot-scrape top 1–2 ranking pages for what's already said and 2–3 citable authoritative sources
-  4. Filter or refine angles based on research: drop dead keywords, re-angle saturated SERPs, drop dupes against manifest + content-library.
-  5. For each surviving angle, call Linear MCP to create an issue:
-     - **Project: `LINEAR_DISCOVERY_PROJECT_ID`** (configured — must be set; strategist refuses to proceed if missing)
-     - Team: derived from the project (Linear projects belong to a team)
-     - Label: `Discovery`
-     - State: `Backlog` *within the configured project*
-     - Body: structured markdown — source transcript ref + timestamp, the inspiring quote, suggested target keyword + GSC stats, competitive landscape (top 3 URLs + gap), pre-identified citable sources, suggested pillar, dedup notes
-     - Idempotency: include a client dedup key `discovery:<transcript_id>:<angle_hash>` in the body so retries don't double-create
+  3. External validation per candidate angle:
+     - Search Console: keyword viability (volume, current rank, striking distance)
+     - Exa / Tavily / Brave: competitive landscape — depth, gap, saturation
+     - Firecrawl: spot-scrape top 1–2 ranking pages for what's covered and 2–3 citable sources
+  4. Filter/refine angles based on research; drop dupes against `content/manifest.json` + content-library results.
+  5. For each surviving angle, create a Linear-backed subject via the subject API (see "Subject backend" section for dispatch path):
+     - kind: `linear-discovery` (the local subject alias)
+     - title: punchy headline
+     - body: structured markdown (source transcript ref, quote, suggested keyword + GSC stats, competitive landscape, pre-identified sources, suggested pillar, dedup notes, **idempotency key** `discovery:<transcript_id>:<angle_hash>` in body)
+     - Before creating, query existing subjects in the project for any with matching idempotency key in body; skip if present.
+  6. **After successfully processing each transcript file**, advance `.ao/state/discovery-cursor.json` to that transcript's ID + timestamp. Failure on transcript N leaves cursor at transcript N-1 — N is retried next run.
 - **Capabilities:** `mutates_state: true`
-- **Output contract:** `phase_result` with required field `issues_created: array<{id, title, transcript_id}>`
+- **Output contract:** `phase_result` with required field `issues_created: array<{subject_id, title, transcript_id}>`
 
 ### `approval-watcher` (new)
 
 - **Model:** `claude-haiku-4-5`
-- **mcp_servers:** `ao`, `linear`
+- **mcp_servers:** `ao`
 - **Per-run directive:**
-  1. Read `.ao/state/approval-seen.json` (list of already-handled issue IDs).
-  2. Linear GraphQL query, **scoped to the configured project**:
-     `issues where project.id = LINEAR_DISCOVERY_PROJECT_ID AND label.name = "Discovery" AND state.type != "backlog"`.
-     The project scope is mandatory — without it the watcher would respond to status changes anywhere in the workspace.
+  1. Read `.ao/state/approval-seen.json` (list of subject IDs already enqueued).
+  2. List subjects of kind `linear-discovery`, scoped to `LINEAR_DISCOVERY_PROJECT_ID`, with `status == InProgress`. Explicitly do NOT include `Cancelled` (rejected), `Done` (already processed), or `Blocked`. The `Ready` filter is implicit (no transition yet, no approval).
   3. Subtract the seen set.
-  4. For each newly-approved issue, call `animus_queue_enqueue` with:
+  4. For each new approval, call `animus_queue_enqueue` with:
      ```
      workflow_ref: blog-from-ticket
-     input: {linear_issue_id, title, body, labels, suggested_pillar, suggested_keyword, pre_identified_sources}
+     input: { subject_id: "<id>", subject_kind: "linear-discovery" }
      ```
-  5. Append the IDs to `approval-seen.json` (atomic write).
-  6. If nothing new, emit `skip` verdict — no noisy task creation.
-- **Output contract:** `phase_result` with required field `enqueued: array<{issue_id, queue_id}>`
+     Only the subject ID is enqueued — the body, title, labels, etc. are re-fetched fresh in `ticket-to-brief`. This handles two cases the original design didn't: (a) humans editing the ticket body between approval and processing, (b) queue input shape uncertainty.
+  5. Append IDs to `approval-seen.json` (atomic write — tmpfile + rename).
+  6. If nothing newly approved, emit skip with reason `no_approvals`.
+- **Output contract:** `phase_result` with required field `enqueued: array<{subject_id, queue_id}>`
 
 ### `linear-coordinator` (new, used in two phases)
 
 - **Model:** `claude-haiku-4-5`
-- **mcp_servers:** `linear`
-- **Used in two phases of `blog-from-ticket`:**
-  - `ticket-acknowledge` (first phase) — receives `linear_issue_id`, posts a "🤖 generation started" comment with the Animus run ID and branch name, transitions state to `In Progress`.
-  - `linear-finalize` (last phase) — receives outputs from prior phases (slug, branch, commit SHA, image path, SEO summary), posts a final comment with the branch URL, featured image, final slug, word count, and SEO fixes summary, transitions state to `In Review`.
-- **Failure path:** if invoked via the workflow's failure hook (`on_failure`, pending v0.4.2 support verification), posts an error comment and moves the ticket back to `Backlog`. If `on_failure` is not supported in v0.4.2, the daemon's run history is the failure surface and the human re-approves manually.
+- **mcp_servers:** `ao`
+- **Used in:**
+  - `ticket-acknowledge` (first phase of `blog-from-ticket`) — receives `subject_id`, posts a "🤖 generation started" comment with the Animus run ID and branch name. **Does NOT transition status** — the human already did that by approving.
+  - `linear-finalize` (last phase) — posts a rich completion comment (branch URL, slug, word count, image embed, SEO summary). **Status transition is opt-in via the `LINEAR_FINALIZE_TRANSITION` env var:** unset (default) = no transition (the human moves the issue to their team's preferred review/QA state); set to `Done` = mark complete (plugin picks the lowest-position `completed` state). Granular states like "In Review" can't be set through the subject abstraction; if those are required, use `animus plugin call --name animus-subject-linear ...` directly.
+- **Failure path:** if invoked via the workflow's failure hook (verified during preflight), posts an error comment. Does not auto-revert status — the human chooses how to handle.
 
 ## Extended (existing) agents
 
 ### `content-strategist`
 
-- **Add to `mcp_servers`:** `linear`, `content-library`
-- **New use:** runs the new `ticket-to-brief` phase. Reads `business-context.yaml`, fetches the Linear issue (humans may have edited the body during review), threads the pre-identified sources from the issue body into the brief, refines the target keyword via Search Console, emits the same `topic_brief` contract today's `topic-research` produces.
-- **Existing use (`topic-research` in `blog-production`):** unchanged.
+- **Add to `mcp_servers`:** `content-library` (Linear access moves through subject API, not MCP)
+- **New use:** runs `ticket-to-brief`. Receives `subject_id` from the queue payload. Fetches the latest subject (title, body, status, comments) via subject API — re-fetch is mandatory because humans may edit between approval and processing. Reads `business-context.yaml`. Threads pre-identified sources from body into the brief, refines target keyword via Search Console, emits the same `topic_brief` contract today's `topic-research` produces.
+- **Existing use (`topic-research`):** unchanged.
 
 ### `content-writer`
 
 - **Add to `mcp_servers`:** `content-library`
-- **Behavior change:** when picking 2–3 internal links, queries `content-library` MCP and `content/manifest.json` for related published posts rather than guessing slugs.
-- **Otherwise unchanged.**
+- **Behavior change:** queries `content-library` MCP and `content/manifest.json` for real internal-link candidates.
 
 ### `seo-optimizer`
 
 - **Add to `mcp_servers`:** `content-library`
-- **Behavior change:** verifies that internal-link slugs the writer chose actually exist (via `content-library` lookup and `content/manifest.json` cross-check).
-- **Otherwise unchanged.**
+- **Behavior change:** verifies internal-link slugs against `content-library` and `content/manifest.json`.
 
 ## New phases
 
 ### `transcript-fetch` (in `idea-discovery`)
 
-Mode: agent. Agent: `transcript-collector`. Directive as above. Capabilities: `mutates_state: true` (writes to `.ao/state/`).
+Mode: agent. Agent: `transcript-collector`. Capabilities: `mutates_state: true`. **Does not advance the cursor.**
 
 ### `idea-strategist` (in `idea-discovery`)
 
-Mode: agent. Agent: `idea-strategist`. Receives transcript paths from prior phase. Capabilities: `mutates_state: true` (creates Linear issues).
+Mode: agent. Agent: `idea-strategist`. Receives transcript paths from prior phase. Capabilities: `mutates_state: true`. **Advances cursor per-transcript on success.**
 
 ### `approval-watcher` (in `approval-watch`)
 
-Mode: agent. Agent: `approval-watcher`. Capabilities: `mutates_state: true` (enqueues + writes seen file).
+Mode: agent. Agent: `approval-watcher`. Capabilities: `mutates_state: true`.
 
 ### `ticket-acknowledge` (in `blog-from-ticket`, first phase)
 
-Mode: agent. Agent: `linear-coordinator`. Receives full input payload from queue. Capabilities: `mutates_state: true` (Linear state transition).
+Mode: agent. Agent: `linear-coordinator`, mode `acknowledge`. Receives `{subject_id}` from queue payload. Capabilities: `mutates_state: true`.
 
 ### `ticket-to-brief` (in `blog-from-ticket`, second phase)
 
-Mode: agent. Agent: `content-strategist`. Receives `linear_issue_id` + payload from prior phase. Emits the same `topic_brief` output contract that `topic-research` does today, so downstream phases work unchanged.
+Mode: agent. Agent: `content-strategist`. Receives `{subject_id}` from prior phase. **Re-fetches the latest subject body before building the brief** (per feedback point 6). Emits same `topic_brief` contract as `topic-research`.
 
 ### `register-post` (in `blog-from-ticket` AND retrofitted into `blog-production`)
 
-Mode: `command`. No agent. Implemented as a small script (Bash + jq or a Node one-liner) that:
-1. Parses YAML frontmatter from `content/<slug>.md`
-2. Reads existing `content/manifest.json` (creates `{"version": 1, "posts": []}` if missing)
-3. Appends a new entry (see manifest schema below)
-4. Writes atomically (tmpfile + rename)
-5. `git add content/manifest.json && git commit -m "Register <slug> in manifest"`
+**Mode: agent** (not command — feedback point 7). A tiny agent (`claude-haiku-4-5`, no MCPs) that:
+1. Reads `slug` from the prior phase's output (the `seo-review` phase emits a slug-bearing phase result)
+2. Optionally reads `linear_issue_id` / `source_transcript_id` from the workflow input
+3. Invokes `scripts/register-post.sh <slug>` via Bash with those as env vars
+4. Returns the commit_message from the script's stdout
 
-Capabilities: `mutates_state: true`. Animus serializes this phase across concurrent runs via the runner mutex.
+This sidesteps the question of whether a command phase can receive prior-phase outputs as env vars (which would require Animus-version-specific verification).
+
+**Position in pipeline (revised per feedback point 8): AFTER `push-branch`, BEFORE `linear-finalize`.** The manifest now represents "post artifact on origin" — entries only appear when the post has been committed to origin, image generated (or attempted), social excerpts written, and pushed. `linear-finalize` reads from a manifest that's guaranteed to be current.
 
 ### `linear-finalize` (in `blog-from-ticket`, last phase)
 
-Mode: agent. Agent: `linear-coordinator`. Capabilities: `mutates_state: true`.
+Mode: agent. Agent: `linear-coordinator`, mode `finalize`. Reads slug + branch + commit_message from prior phases; reads `content/manifest.json` entry for additional metadata. Capabilities: `mutates_state: true`.
 
 ## Workflows
 
 ```yaml
 - id: idea-discovery
   name: Transcript-Driven Idea Discovery
-  description: Poll Krisp transcripts, propose blog ideas as Linear tickets
+  description: Poll Krisp transcripts and propose blog ideas as Linear-backed subjects
   phases:
   - transcript-fetch
   - idea-strategist
 
 - id: approval-watch
   name: Linear Approval Watcher
-  description: Poll Linear for tickets that left Backlog, enqueue blog-from-ticket
+  description: Poll Linear-backed subjects for InProgress status and enqueue blog-from-ticket
   phases:
   - approval-watcher
 
 - id: blog-from-ticket
-  name: Blog Generation from Approved Linear Ticket
-  description: Generate a blog post from a human-approved Linear discovery ticket
+  name: Blog Generation from Approved Linear Subject
+  description: Generate a blog post from a human-approved Linear discovery subject
   phases:
   - ticket-acknowledge
   - ticket-to-brief
@@ -229,14 +269,14 @@ Mode: agent. Agent: `linear-coordinator`. Capabilities: `mutates_state: true`.
   - content-writing
   - commit-draft
   - seo-review
-  - register-post
   - asset-generation
   - social-excerpts
   - push-branch
+  - register-post       # ← new placement: AFTER push-branch
   - linear-finalize
 ```
 
-`blog-production` gets `register-post` inserted between `seo-review` and `asset-generation`. Other existing workflows unchanged.
+`blog-production` gets `register-post` inserted as its last phase (after `push-branch`). Other existing workflows unchanged.
 
 ## Schedules
 
@@ -271,7 +311,7 @@ Added to the `schedules:` block. Existing schedules unchanged.
       "tags": ["rental", "investment", "yields"],
       "word_count": 1850,
       "summary": "One-paragraph excerpt.",
-      "linear_ticket_id": "BLG-42",
+      "linear_subject_id": "linear-discovery:BLG-42",
       "source_transcript_id": "krisp-2026-04-10-product-meeting",
       "branch": "feature/blog-rental-yields-2026"
     }
@@ -279,44 +319,49 @@ Added to the `schedules:` block. Existing schedules unchanged.
 }
 ```
 
-Bootstrapping: if missing, `register-post` creates `{"version": 1, "posts": []}` on first run.
+Bootstrapping: committed as `{"version": 1, "posts": []}` on initial setup.
 
 ### `.ao/state/discovery-cursor.json`
 
 ```json
-{ "last_transcript_id": "krisp-2026-06-03-abc123", "updated_at": "2026-06-04T07:00:12Z" }
+{
+  "last_processed_id": "krisp-2026-06-03-abc123",
+  "last_processed_at": "2026-06-03T14:22:00Z",
+  "updated_at": "2026-06-04T07:00:12Z"
+}
 ```
+
+Storing both ID and timestamp protects against Krisp's listing-order semantics (if IDs aren't sortable, we fall back to `last_processed_at` for cutoff). Advanced **only** by `idea-strategist` per transcript on success.
 
 ### `.ao/state/approval-seen.json`
 
 ```json
-{ "issues": ["BLG-101", "BLG-102", "BLG-105"], "updated_at": "2026-06-05T14:15:03Z" }
+{
+  "subject_ids": ["linear-discovery:BLG-101", "linear-discovery:BLG-105"],
+  "updated_at": "2026-06-05T14:15:03Z"
+}
 ```
 
 ### Queue input payload (approval-watcher → blog-from-ticket)
 
 ```json
 {
-  "linear_issue_id": "BLG-105",
-  "title": "Commuter Town Rental Yields 2026",
-  "body": "...full markdown body as authored by strategist + edited by human...",
-  "labels": ["Discovery", "Market Analysis"],
-  "suggested_pillar": "Market Analysis",
-  "suggested_keyword": "commuter town rental yields 2026",
-  "pre_identified_sources": [
-    {"url": "https://ons.gov.uk/...", "supports": "ONS rental index Q1 2026"},
-    {"url": "https://hamptons.co.uk/...", "supports": "Hamptons quarterly market report"}
-  ]
+  "subject_id": "linear-discovery:BLG-105",
+  "subject_kind": "linear-discovery"
 }
 ```
 
+That's it. No body, no labels, no pre-extracted sources — all of that is re-fetched in `ticket-to-brief` from the (potentially-edited) Linear issue.
+
 ## External research allocation
+
+Unchanged from prior revision — discovery does light external research (viability + sources); production does deep external research (research-collection).
 
 | Phase | Agent | External MCPs | Research depth |
 |---|---|---|---|
 | transcript-fetch | transcript-collector | krisp | data ingest |
 | idea-strategist | idea-strategist | search-console, exa, tavily, brave, firecrawl, content-library | light pass — viability + sources |
-| ticket-to-brief | content-strategist | search-console, linear, content-library | keyword refinement + source threading |
+| ticket-to-brief | content-strategist | search-console, content-library | keyword refinement + source threading (Linear access via subject API, not MCP) |
 | research-collection | content-researcher | firecrawl, exa, tavily, brave, google-maps | deep pass — amplify + extend |
 | content-writing | content-writer | content-library | internal synthesis |
 | seo-review | seo-optimizer | search-console, firecrawl, content-library | verification |
@@ -325,31 +370,37 @@ Bootstrapping: if missing, `register-post` creates `{"version": 1, "posts": []}`
 
 | Failure | State | Recovery |
 |---|---|---|
-| Krisp outage | `transcript-fetch` fails, cursor unchanged | Retried next cron tick |
-| Linear outage during discovery | Strategist fails after partial issue creation | Per-issue client dedup key prevents doubles; retry next tick |
-| Linear outage during approval-watch | No tickets enqueued | Retried next tick (15 min) |
-| `animus_queue_enqueue` failure | Issue stays absent from `approval-seen.json` | Retried next tick |
-| Manifest write race (concurrent `blog-from-ticket` runs) | — | Animus runner mutex via `mutates_state: true` serializes |
-| Workflow failure mid-`blog-from-ticket` | Ticket stuck in `In Progress` | `linear-coordinator` `on_failure` hook (if v0.4.2 supports it) moves to `Backlog` + error comment; otherwise human re-approves |
-| Human edits ticket body before approval | — | `ticket-to-brief` reads the latest issue body at brief time, so edits flow through |
+| Krisp outage | `transcript-fetch` fails; cursor unchanged (never touched in this phase anyway) | Retried next cron tick |
+| Subject backend outage during discovery | Strategist fails partway; cursor advanced only for transcripts whose subjects were successfully created | Next tick re-attempts unprocessed transcripts; idempotency key prevents duplicate subjects |
+| Subject backend outage during approval-watch | No subjects enqueued | Retried next tick |
+| `animus_queue_enqueue` failure | Subject stays absent from `approval-seen.json` | Retried next tick |
+| Manifest write race (concurrent runs) | — | `register-post` is `mutates_state: true` → runner mutex serializes |
+| Workflow failure mid-`blog-from-ticket` | Subject stays at `InProgress`; no terminal Linear comment | `linear-coordinator` failure path posts an error comment if `on_failure` is supported; human handles |
+| Human edits ticket body between approval and processing | — | `ticket-to-brief` re-fetches at brief time, so edits flow through |
+| Human cancels ticket after approval | Subject becomes `Cancelled` mid-pipeline | Pipeline continues (Animus doesn't auto-cancel runs on subject status change); finalize comment lands on a Cancelled ticket which is harmless |
 
 ## Open questions / configuration to confirm at implementation time
 
-1. The actual registered names of `krisp`, `linear`, `content-library` MCP servers in `.mcp.json`.
-2. **`LINEAR_DISCOVERY_PROJECT_ID`** — the Linear project ID (UUID) where Discovery tickets live. Set in `.env` and referenced from the workflow YAML / agent directives. The project must exist before first run; the strategist and approval-watcher both refuse to proceed without it.
-3. The exact Linear state names within that project: which state means "Backlog" (initial), which means "In Progress" (active), which means "In Review" (branch ready), which means "Done" (published). These may not match Linear defaults if the project has custom states. Configured as `LINEAR_STATE_BACKLOG_ID`, `LINEAR_STATE_IN_PROGRESS_ID`, `LINEAR_STATE_IN_REVIEW_ID`, `LINEAR_STATE_DONE_ID`.
-4. Whether Animus v0.4.2 supports a phase-level or workflow-level `on_failure` hook for `linear-coordinator`'s error path. If not, the design degrades gracefully to human re-approval as the recovery path.
-5. Whether `register-post` should also write to the `content-library` MCP (push), or whether the content-library is read-only from this repo's perspective and ingests from `content/` separately.
+These are resolved during the **dependency preflight task** (the first task of the plan) — none should be guessed.
+
+1. **Subject API surface** — does `animus_subject_create` / `animus_subject_list` / `animus_subject_update` exist as MCP tools in v0.5.4's `ao` server, or does dispatch happen via `animus plugin call --name animus-subject-linear ...` from Bash? Preflight: run `animus mcp serve` and list tools; if subject namespace is exposed, agents call directly; if not, agents invoke via Bash + plugin call.
+2. **Queue input propagation** — does `animus_queue_enqueue`'s `input` field actually flow through to the dispatched workflow as accessible state? Preflight: enqueue a disposable workflow with a known input shape; verify the first phase can read it.
+3. **Krisp MCP package name + tool surface** — placeholder `krisp-mcp-server`; replace with real package; verify list-transcripts and fetch-transcript tools exist.
+4. **Content library MCP package name + tool surface** — placeholder `content-library-mcp`; replace with real package; verify search/list/get tools.
+5. **`LINEAR_FINALIZE_TRANSITION`** — default unset (no transition); team chooses whether to set it to `Done`. If they want "In Review" specifically, plan documents the `animus plugin call` path.
+6. **Animus `on_failure` hook support in v0.5.4** — if supported, `linear-coordinator` registers a failure path that posts an error comment; if not, daemon logs are the failure surface.
 
 ## Reference — relevant Animus skills
 
 Implementation should consult, via the `Skill` tool:
-- `animus-workflow-authoring` — workflow/agent/phase YAML structure, schedules, cron, MCP servers
+- `animus-workflow-authoring` — workflow/agent/phase YAML structure, schedules, cron, MCP servers, **subjects**
+- `animus-subject-operations` — subject creation, listing, status transitions (newly relevant given the architecture shift)
 - `animus-workflow-patterns` — queue handoff, gating, retries
 - `animus-mcp-setup` — wiring MCP servers into agents and per-agent allowlists
 - `animus-task-management` — `animus_task_*` MCP tools and task lifecycle
 - `animus-queue-management` — `animus_queue_*` MCP tools and enqueue semantics
 - `animus-skills` — how per-project `.ao/skills/*.md` files are loaded by agents
 - `animus-troubleshooting` — daemon, runner, and workflow failure modes
+- `animus-plugin-operations` — plugin install, inspect, ping, dispatch (newly relevant)
 
 After any change to `.ao/workflows/custom.yaml`, run `animus workflow config compile` (per project `CLAUDE.md`).

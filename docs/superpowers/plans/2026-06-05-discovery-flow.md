@@ -2,13 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an upstream `idea-discovery → human-review-in-Linear → approval-watch → blog-from-ticket` pipeline to `.ao/workflows/custom.yaml`, with a `content/manifest.json` for local dedup.
+**Goal:** Add an upstream `idea-discovery → human-review-in-Linear → approval-watch → blog-from-ticket` pipeline to `.ao/workflows/custom.yaml`, with Linear integrated as an **Animus subject backend** (via `animus-subject-linear` plugin) and `content/manifest.json` as the local post index.
 
-**Architecture:** Three new workflows, four new agents, eight new phases, two extended phases on existing agents, one new shell/jq script (`register-post`). All YAML lives in the single existing `.ao/workflows/custom.yaml`. The script lives at `scripts/register-post.sh`. State files live in `.ao/state/` (gitignored). Per-spec: `docs/superpowers/specs/2026-06-05-discovery-flow-design.md`.
+**Architecture (revised):** Three new workflows, four new agents, eight new phases, two extended phases on existing agents, one new shell/jq script (`register-post`). Linear is **not** treated as a generic MCP server; it is a first-class Animus subject backend. The `animus_subject_*` tool surface (or `animus plugin call` dispatch path) is verified during the dependency preflight before any YAML changes happen.
 
-**Linear integration via the Animus `linear-pack` connector-pack** (`launchapp-dev/linear-pack`), which bundles the `@anthropic-ai/linear-mcp@latest` MCP server plus an `issue-management` skill and Linear-aware agents. Installed via `animus pack install` (not `animus plugin install` — different subcommand; packs are workflow bundles, plugins are STDIO binaries).
-
-**Tech Stack:** Animus v0.4.2 (workflow runner, MCP server proxy, queue, pack manager), YAML for declarative pipeline, Bash + `jq` + `yq` for `register-post`, `bats-core` for shell tests, `@anthropic-ai/linear-mcp` for Linear, the linear-pack for Linear skill + agent guidance.
+**Tech Stack:** Animus v0.5.4 (workflow runner, MCP server proxy, queue, plugin system, subject backends), `animus-subject-linear` v0.1.4+, YAML for declarative pipeline, Bash + `jq` + `yq` for `register-post`, `bats-core` for shell tests.
 
 ---
 
@@ -20,10 +18,10 @@
 - `content/manifest.json` — canonical index of generated posts (committed; bootstraps to `{"version": 1, "posts": []}`)
 
 **Modified:**
-- `.ao/workflows/custom.yaml` — new MCP servers, agents, phases, workflows, schedules; extended existing agents and `blog-production` phase list
-- `.env.example` — new env vars for Krisp, Linear, content-library, Linear state IDs
+- `.ao/workflows/custom.yaml` — new MCP servers (`krisp`, `content-library` — NOT `linear`), new `subjects:` block, new agents, new phases, new workflows, new schedules; extended existing agents; retrofitted `blog-production`
+- `.env.example` — new env vars for Krisp, Linear subject backend, content-library
 - `.gitignore` — add `.ao/state/`
-- `MCP-TOOLS.md` — document the three new MCP servers
+- `MCP-TOOLS.md` — document the two new MCP servers + the Linear subject backend
 - `README.md` — document the new workflows
 
 **Runtime-created (not in repo):**
@@ -33,60 +31,127 @@
 
 ---
 
-## Task 0: Install the Animus `linear-pack` connector-pack
+## Task -1: Dependency preflight (BEFORE any YAML work)
 
-The pack provides the `linear` MCP server (`@anthropic-ai/linear-mcp@latest`), an `issue-management` skill our agents will reference, and Linear-aware sample agents. The pack is not in any registered marketplace, so installation is from a local clone.
+This task establishes ground truth for the API surface, install paths, and queue semantics that the rest of the plan depends on. **No YAML changes happen until this task is fully green.** If any step here surfaces an unexpected behavior, the plan revises before proceeding.
 
-**Files:** none modified in this task; pack installs under `~/.animus/packs/`.
+**Files:** none modified.
 
-- [ ] **Step 1: Clone the pack locally**
-
-```bash
-mkdir -p ~/src
-git clone https://github.com/launchapp-dev/linear-pack.git ~/src/linear-pack
-```
-Expected: clone succeeds; `~/src/linear-pack/pack.toml` exists.
-
-- [ ] **Step 2: Verify the pack manifest**
+- [ ] **Step 1: Confirm Animus version**
 
 ```bash
-animus pack inspect --path ~/src/linear-pack
+animus --version
 ```
-Expected: prints the pack id (`linear`), version (`0.1.0`), exported workflows, and runtime overlay reference.
+Expected: `animus 0.5.4` or higher.
 
-- [ ] **Step 3: Install and activate the pack for this project**
-
-From the project root (`/Users/rafal/animus-blog-generator`):
+- [ ] **Step 2: Install `animus-subject-linear`**
 
 ```bash
-animus pack install --path ~/src/linear-pack --activate
+animus plugin install launchapp-dev/animus-subject-linear
 ```
-Expected: success. The pack is now in `~/.animus/packs/linear/0.1.0/` and activated for this project.
+Expected: a release asset is downloaded, manifest check passes, and the plugin binary lands in `~/.animus/plugins/`. Note the version installed.
 
-- [ ] **Step 4: Verify activation**
+- [ ] **Step 3: Verify the plugin is discovered**
 
 ```bash
-animus pack list
+animus plugin list
 ```
-Expected: `linear` appears with status "active" for this project.
+Expected: output JSON includes `animus-subject-linear` with `plugin_kind = "subject_backend"`.
 
-- [ ] **Step 5: No commit needed**
+- [ ] **Step 4: Inspect the plugin's manifest + capabilities**
 
-The pack lives in user state, not in the repo. Documentation of the dependency happens in Task 15.
+```bash
+animus plugin info --name animus-subject-linear
+```
+Expected: prints the manifest (schema, version, plugin_kind=subject_backend, capabilities) and lists the JSON-RPC methods exposed (likely `subject.list`, `subject.get`, `subject.create`, `subject.update`, `subject.comment` — verify the exact method names from the output).
+
+- [ ] **Step 5: Ping the plugin**
+
+```bash
+LINEAR_API_TOKEN="$LINEAR_API_TOKEN" animus plugin ping --name animus-subject-linear
+```
+Expected: handshake completes and ping succeeds. If it fails on missing env, you'll know which env var the plugin actually wants (`LINEAR_API_TOKEN` vs `LINEAR_API_KEY` — match what shows up).
+
+- [ ] **Step 6: Verify a read-only list call works**
+
+```bash
+animus plugin call --name animus-subject-linear --method subject.list \
+  --params '{"team": "<YOUR_TEAM_KEY>", "limit": 5}'
+```
+Expected: returns a list of subjects (possibly empty) without auth errors. Adapt method name + param shape to match what `plugin info` showed in step 4. Record the exact method names and param shapes for use in agent directives later.
+
+- [ ] **Step 7: Determine whether `animus_subject_*` MCP tools are exposed**
+
+```bash
+# Start a temporary ao MCP serve and inspect the tool list
+animus mcp serve --help        # confirm subcommand exists
+# In another terminal or via tool listing helpers:
+animus plugin list --include-system-path
+```
+What we're checking: does the `ao` MCP server (which agents already use) expose subject CRUD as `animus_subject_*` tools, or do agents need to invoke `animus plugin call` from Bash to interact with Linear?
+
+If the MCP tools exist: agent directives reference them directly.
+If they don't: agent directives invoke via Bash (`animus plugin call --name animus-subject-linear --method subject.create --params '...'`).
+
+**Record which path applies — every agent directive that touches Linear is written against that path.**
+
+- [ ] **Step 8: Verify queue input propagation with a disposable workflow**
+
+Create a throwaway test workflow that proves `animus_queue_enqueue`'s `input` field reaches the dispatched workflow's first phase as accessible state. Steps:
+
+1. Write a one-phase workflow `phase-input-probe` whose single phase prints `{{input}}` (or the equivalent template variable) and exits.
+2. Add it to a scratch YAML, compile.
+3. Enqueue it with a known input: `animus queue enqueue --workflow-ref phase-input-probe --input-json '{"probe":"hello"}'`
+4. Wait for it to run; check the phase output. Confirm the input was reachable.
+5. Document the exact variable/template syntax the first phase used to read the input — this is what `blog-from-ticket`'s `ticket-acknowledge` will use.
+
+Expected outcome: input flows through, OR you discover the limitation and the plan adapts (e.g., persists the input to a state file rather than queue payload).
+
+Clean up the disposable workflow at the end of this step.
+
+- [ ] **Step 9: Determine subject wire-ID semantics**
+
+Use the plugin's list call to fetch a real subject. Observe whether the ID format is `linear:<id>`, `linear-discovery:<id>` (the local alias), bare Linear UUID, or something else. This is what the queue payload's `subject_id` field will carry.
+
+**Decision point:** based on whether the wire ID embeds the kind prefix:
+- If it embeds `linear-discovery:<id>` → queue payload is `{subject_id: "linear-discovery:LIN-123"}` and approval-watcher only needs to query its single subject alias.
+- If wire IDs are bare → queue payload is `{subject_id: "LIN-123", subject_kind: "linear-discovery"}` and downstream phases use both fields.
+
+Document which path applies.
+
+- [ ] **Step 10: Verify Krisp and content-library MCP server names**
+
+Ask the user (or check `.mcp.json` / configuration notes) for the actual registered package names for the Krisp MCP and the custom content-library MCP. If unknown, mark them as **external prerequisites** that must be resolved before Task 2.
+
+- [ ] **Step 11: Record preflight outcomes**
+
+Create `.ao/state/preflight-discovery-flow.md` (gitignored — it's a local note) containing:
+- Animus version
+- `animus-subject-linear` version installed
+- Method names + param shapes recorded from steps 4 and 6
+- MCP tool path vs `animus plugin call` path decision from step 7
+- Queue input syntax from step 8
+- Wire ID format from step 9
+- Krisp / content-library package name resolution
+
+This document is referenced by every subsequent task that needs to know the exact API call shape.
+
+- [ ] **Step 12: No commit needed for preflight**
+
+The preflight changes user state (`~/.animus/plugins/`) but not the repo. Outcomes feed into the rest of the plan.
 
 ---
 
-## Task 1: Project scaffolding (state dir, gitignore, env vars, manifest bootstrap)
+## Task 0: Project scaffolding (state dir, gitignore, env vars, manifest bootstrap)
 
 **Files:**
 - Modify: `.gitignore`
 - Modify: `.env.example`
 - Create: `content/manifest.json`
-- Create: `.ao/state/.gitkeep` (so the dir exists but contents are ignored)
 
 - [ ] **Step 1: Add `.ao/state/` to `.gitignore`**
 
-Edit `.gitignore` to add the state dir alongside the existing `.ao/logs/`:
+Edit `.gitignore` to add (alongside the existing `.ao/logs/`):
 
 ```
 # AO runtime
@@ -95,26 +160,29 @@ Edit `.gitignore` to add the state dir alongside the existing `.ao/logs/`:
 .ao/sync.json
 ```
 
+**No `.gitkeep`.** Phases that need the directory will `mkdir -p` it. This avoids the "ignored dir + tracked gitkeep" trap.
+
 - [ ] **Step 2: Append new env vars to `.env.example`**
 
-Append to `.env.example`:
+Append:
 
 ```
 # Audio Transcript Source (Krisp; portable to Granola)
 KRISP_API_KEY=
 
-# Linear (Discovery flow)
-LINEAR_API_KEY=
-LINEAR_DISCOVERY_PROJECT_ID=
-LINEAR_STATE_BACKLOG_ID=
-LINEAR_STATE_IN_PROGRESS_ID=
-LINEAR_STATE_IN_REVIEW_ID=
-LINEAR_STATE_DONE_ID=
+# Linear (via animus-subject-linear plugin)
+LINEAR_API_TOKEN=
+LINEAR_TEAM=                           # Linear team key (e.g. ENG, BLG)
+LINEAR_DISCOVERY_PROJECT_ID=           # Project UUID for blog ideas
+LINEAR_STATUS_MAP=                     # Optional JSON override (see plugin README)
+LINEAR_FINALIZE_TRANSITION=            # Optional: set to "Done" to auto-complete on finalize; unset = no transition
 
 # Content Library MCP
 CONTENT_LIBRARY_URL=
 CONTENT_LIBRARY_TOKEN=
 ```
+
+**Note** what's NOT in the env list: granular per-state IDs (`LINEAR_STATE_BACKLOG_ID` / `IN_PROGRESS_ID` / `IN_REVIEW_ID` / `DONE_ID`). The subject plugin auto-maps by `WorkflowState.type`, so the granular UUIDs are unnecessary. Override only via `LINEAR_STATUS_MAP` if needed.
 
 - [ ] **Step 3: Bootstrap `content/manifest.json`**
 
@@ -127,16 +195,15 @@ Create `content/manifest.json` with exact content:
 }
 ```
 
-- [ ] **Step 4: Verify everything is in place**
+- [ ] **Step 4: Verify**
 
-Run:
 ```bash
-cat .gitignore | grep "state"
+grep "state" .gitignore
 test -f content/manifest.json && cat content/manifest.json
 grep -c "LINEAR_DISCOVERY_PROJECT_ID" .env.example
+grep -c "LINEAR_STATE_BACKLOG_ID" .env.example
 ```
-
-Expected: `.ao/state/` line present, manifest prints with empty posts array, env var grep returns `1`.
+Expected: state line present, manifest prints with empty posts array, project_id grep returns `1`, state_backlog grep returns `0` (we did NOT add per-state IDs).
 
 - [ ] **Step 5: Commit**
 
@@ -147,74 +214,76 @@ git commit -m "Bootstrap discovery-flow state dir, env vars, and content manifes
 
 ---
 
-## Task 2: Add new MCP servers to custom.yaml
+## Task 1: Add Krisp + content-library MCP servers (no Linear MCP)
 
 **Files:**
 - Modify: `.ao/workflows/custom.yaml` (mcp_servers block)
 
-- [ ] **Step 1: Add `krisp`, `linear`, `content-library` to `mcp_servers:`**
+- [ ] **Step 1: Add `krisp` and `content-library` to `mcp_servers:`**
 
-After the existing `perplexity:` block (around line 85) and before the `# ── Publishing (bring your own CMS) ──` comment, insert:
+After the existing `perplexity:` block and before the `# ── Publishing (bring your own CMS)` comment, insert:
 
 ```yaml
   krisp:
     command: npx
     args:
     - -y
-    - krisp-mcp-server
+    - <KRISP_PACKAGE_NAME>           # from preflight Step 10
     env:
       KRISP_API_KEY: ${KRISP_API_KEY}
-  linear:
-    command: npx
-    args:
-    - -y
-    - '@anthropic-ai/linear-mcp@latest'
-    env:
-      LINEAR_API_KEY: ${LINEAR_API_KEY}
-      LINEAR_DISCOVERY_PROJECT_ID: ${LINEAR_DISCOVERY_PROJECT_ID}
-      LINEAR_STATE_BACKLOG_ID: ${LINEAR_STATE_BACKLOG_ID}
-      LINEAR_STATE_IN_PROGRESS_ID: ${LINEAR_STATE_IN_PROGRESS_ID}
-      LINEAR_STATE_IN_REVIEW_ID: ${LINEAR_STATE_IN_REVIEW_ID}
-      LINEAR_STATE_DONE_ID: ${LINEAR_STATE_DONE_ID}
   content-library:
     command: npx
     args:
     - -y
-    - content-library-mcp
+    - <CONTENT_LIBRARY_PACKAGE_NAME>  # from preflight Step 10
     env:
       CONTENT_LIBRARY_URL: ${CONTENT_LIBRARY_URL}
       CONTENT_LIBRARY_TOKEN: ${CONTENT_LIBRARY_TOKEN}
 ```
 
-Note: `@anthropic-ai/linear-mcp@latest` is the real Linear MCP package (same one bundled in the `linear-pack` installed in Task 0). The other two — `krisp-mcp-server` and `content-library-mcp` — are placeholders; replace with the actual registered package names known to the user. See "Configuration to confirm" at the end of this plan.
+**Linear is intentionally NOT added here.** It's a subject backend, declared in the next step.
 
-- [ ] **Step 2: Validate the YAML compiles**
+- [ ] **Step 2: Add the `subjects:` block declaring the Linear subject backend**
 
-Run: `animus workflow config validate`
-Expected: success (no shape errors). If it complains about an unknown mcp_server reference, the issue is elsewhere — read the error and fix.
+If the YAML doesn't already have a top-level `subjects:` block, add it after `mcp_servers:` and before `agents:`:
 
-- [ ] **Step 3: Persist the compiled config**
+```yaml
+subjects:
+  linear-discovery:
+    plugin: animus-subject-linear
+    config:
+      api_token_env: LINEAR_API_TOKEN
+      team: ${LINEAR_TEAM}
+      project_id: ${LINEAR_DISCOVERY_PROJECT_ID}
+```
 
-Run: `animus workflow config compile`
-Expected: success.
+The local alias `linear-discovery` is what phases and queue payloads reference.
+
+- [ ] **Step 3: Validate and compile**
+
+```bash
+animus workflow config validate
+animus workflow config compile
+```
+Expected: both succeed. If the `subjects:` schema isn't recognized, check the `animus-workflow-authoring` skill for the exact key name in v0.5.4 (it may be `subject_backends:` or similar — adjust to match).
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add .ao/workflows/custom.yaml
-git commit -m "Add krisp, linear, content-library MCP servers to workflow YAML"
+git commit -m "Add krisp + content-library MCP servers and linear-discovery subject backend"
 ```
 
 ---
 
-## Task 3: Add `transcript-collector` agent + `transcript-fetch` phase
+## Task 2: Add `transcript-collector` agent + `transcript-fetch` phase
 
 **Files:**
-- Modify: `.ao/workflows/custom.yaml` (agents and phases blocks)
+- Modify: `.ao/workflows/custom.yaml`
 
 - [ ] **Step 1: Add the `transcript-collector` agent**
 
-In the `agents:` block (after the existing `content-refresher:` block, before the `# ── Phase Definitions` comment), append:
+In the `agents:` block, append:
 
 ```yaml
   transcript-collector:
@@ -224,38 +293,42 @@ In the `agents:` block (after the existing `content-refresher:` block, before th
     - krisp
     system_prompt: |
       You are a data-ingest agent. You do not reason about content.
-      Your job: list new Krisp transcripts since a cursor, fetch their
-      full text, write them to disk as JSON, advance the cursor.
-      Do not summarize, propose ideas, or call any tool outside Krisp.
+      Your job: list new Krisp transcripts since a cursor and stage them
+      to disk. You do NOT advance the cursor — the next phase does, only
+      after successful processing.
 ```
 
 - [ ] **Step 2: Add the `transcript-fetch` phase**
 
-In the `phases:` block (a logical place is right after the existing `news-scan:` block, near the end of phases), append:
+In the `phases:` block:
 
 ```yaml
   transcript-fetch:
     mode: agent
     agent: transcript-collector
     directive: |
-      Read .ao/state/discovery-cursor.json if it exists; treat missing or
-      empty as cursor=null (process all available transcripts, capped at 20).
+      Read .ao/state/discovery-cursor.json if it exists. Use
+      cursor.last_processed_at as the timestamp cutoff (preferred over
+      last_processed_id since Krisp IDs may not be sortable). If the
+      cursor file is missing, treat as cutoff=null but cap fetch at 20.
 
-      Use the Krisp MCP server to list transcripts created strictly after
-      cursor.last_transcript_id. For each transcript (in chronological order):
-      1. Fetch the full transcript text and metadata
+      Ensure the staging directory exists:
+        mkdir -p .ao/state/transcripts
+
+      Use the Krisp MCP server to list transcripts created strictly
+      after the cutoff. For each transcript (in chronological order):
+      1. Fetch full transcript text and metadata
          (id, created_at, participants, duration_secs, title)
       2. Write to .ao/state/transcripts/<transcript_id>.json with shape:
-         { "id": "...", "created_at": "...", "participants": [...],
-           "duration_secs": N, "title": "...", "text": "..." }
+         { "id": "...", "created_at": "<ISO8601>",
+           "participants": [...], "duration_secs": N,
+           "title": "...", "text": "..." }
 
-      After processing all transcripts, write
-      .ao/state/discovery-cursor.json with:
-        { "last_transcript_id": "<most recent ID processed>",
-          "updated_at": "<current ISO8601>" }
+      DO NOT touch .ao/state/discovery-cursor.json. The idea-strategist
+      phase advances it per-transcript on successful processing.
 
       If no new transcripts, emit a skip verdict with reason
-      "no_new_transcripts" and do NOT touch the cursor.
+      "no_new_transcripts".
     capabilities:
       mutates_state: true
     output_contract:
@@ -270,7 +343,6 @@ In the `phases:` block (a logical place is right after the existing `news-scan:`
             type: string
         count:
           type: integer
-          description: Number of transcripts fetched this run
     decision_contract:
       min_confidence: 0.5
       max_risk: low
@@ -279,30 +351,32 @@ In the `phases:` block (a logical place is right after the existing `news-scan:`
 
 - [ ] **Step 3: Validate and compile**
 
-Run:
 ```bash
 animus workflow config validate
 animus workflow config compile
 ```
-Expected: both succeed.
 
 - [ ] **Step 4: Commit**
 
 ```bash
 git add .ao/workflows/custom.yaml
-git commit -m "Add transcript-collector agent and transcript-fetch phase"
+git commit -m "Add transcript-collector agent and transcript-fetch phase (cursor advance deferred)"
 ```
 
 ---
 
-## Task 4: Add `idea-strategist` agent + `idea-strategist` phase
+## Task 3: Add `idea-strategist` agent + phase (Linear via subject API)
 
 **Files:**
 - Modify: `.ao/workflows/custom.yaml`
 
-- [ ] **Step 1: Add the `idea-strategist` agent**
+**Note:** The directive below uses placeholder `<SUBJECT_CREATE_INVOCATION>` for the subject-create call. Replace it with one of:
+- **If MCP path** (from preflight Step 7): `animus_subject_create` MCP tool with params `{kind: "linear-discovery", title, body}`
+- **If plugin-call path**: `animus plugin call --name animus-subject-linear --method subject.create --params '{...}'` via Bash
 
-After the `transcript-collector:` agent block, append:
+Similarly for `<SUBJECT_LIST_INVOCATION>` (for idempotency check).
+
+- [ ] **Step 1: Add the `idea-strategist` agent**
 
 ```yaml
   idea-strategist:
@@ -310,7 +384,6 @@ After the `transcript-collector:` agent block, append:
     tool: claude
     mcp_servers:
     - ao
-    - linear
     - content-library
     - search-console
     - exa
@@ -319,25 +392,28 @@ After the `transcript-collector:` agent block, append:
     - firecrawl
     system_prompt: |
       SKILLS: Read and follow .ao/skills/content-strategy.md AND the
-      linear-pack's bundled issue-management skill (loaded automatically
-      via the active pack overlay) for correct Linear MCP tool usage.
+      animus-subject-operations skill (loaded automatically) for correct
+      subject API usage.
 
-      CONTEXT: Read business-context.yaml at every run — niche, pillars,
-      audience, voice, competitors, differentiators. If business-context.yaml
-      is missing or empty, refuse to proceed and emit a skip verdict with
-      reason "missing_business_context".
+      CONTEXT: Read business-context.yaml at every run. If missing or
+      empty, refuse and emit skip with reason "missing_business_context".
 
-      You propose blog ideas grounded in (a) actual conversation transcripts
-      and (b) external SEO viability data. Every idea you propose must
-      survive an external-research check before becoming a Linear ticket.
+      You propose blog ideas grounded in (a) actual conversation
+      transcripts and (b) external SEO viability data. Every idea you
+      propose must survive an external-research check before becoming a
+      Linear-backed subject.
 
-      Hard rule: LINEAR_DISCOVERY_PROJECT_ID must be set. If not, emit a
-      skip verdict with reason "missing_project_id".
+      Hard rule: LINEAR_DISCOVERY_PROJECT_ID must be set. If not, emit
+      skip with reason "missing_project_id".
+
+      Cursor discipline: advance .ao/state/discovery-cursor.json ONLY
+      after a transcript has been fully processed (every surviving angle
+      has either become a subject or been confirmed-duplicate). On
+      failure mid-transcript, leave cursor at the prior transcript so
+      the failed one is retried.
 ```
 
 - [ ] **Step 2: Add the `idea-strategist` phase**
-
-After `transcript-fetch:` in `phases:`, append:
 
 ```yaml
   idea-strategist:
@@ -347,69 +423,69 @@ After `transcript-fetch:` in `phases:`, append:
       Input: transcript_paths from the prior phase. If empty, emit skip.
 
       Step 1 — Local context
-      Read business-context.yaml. Read content/manifest.json (treat missing
-      as {"version":1,"posts":[]}). Query content-library MCP for the org's
-      topic fingerprints (covered angles, recent pillars, asset inventory).
+      Read business-context.yaml. Read content/manifest.json (treat
+      missing as {"version":1,"posts":[]}). Query content-library MCP
+      for org-wide topic fingerprints.
 
-      Step 2 — Per-transcript synthesis
-      For each transcript file in transcript_paths:
+      Step 2 — Per-transcript synthesis (iterate)
+      For each transcript file in transcript_paths IN ORDER:
         a. Read the transcript JSON.
-        b. Extract 3-5 candidate blog angles. Each angle MUST quote a
-           specific moment from the transcript (timestamp if available).
-        c. For each candidate, run external validation:
-           - Search Console: target keyword viability (volume, current
-             rank, striking-distance status)
-           - Exa + Tavily + Brave: who covers this angle, what depth,
-             is the SERP saturated or open
-           - Firecrawl: spot-scrape top 1-2 ranking pages; capture
-             (i) what they already cover, (ii) 2-3 authoritative
-             citable sources we could use
-        d. Filter or refine:
-           - Drop angles with zero search demand
-           - Re-angle if the SERP is saturated (find a sharper sub-angle)
-           - Drop angles that duplicate any post in content/manifest.json
-             or any item returned by the content-library query
+        b. Extract 3-5 candidate blog angles, each quoting a specific
+           transcript moment with timestamp.
+        c. External validation per candidate:
+           - Search Console: keyword viability (volume, rank, striking distance)
+           - Exa + Tavily + Brave: competitive landscape
+           - Firecrawl: spot-scrape top 1-2 SERP pages for what's covered
+             + 2-3 citable authoritative sources
+        d. Filter/refine: drop dead-keyword angles, re-angle saturated
+           SERPs, drop dupes vs content/manifest.json AND content-library.
+        e. For each surviving angle:
+           i.  Compute idempotency key:
+               key = "discovery:<transcript_id>:<8-char hash of (transcript_id + angle title)>"
+           ii. Check for an existing subject with this key:
+               <SUBJECT_LIST_INVOCATION> filtered to project=LINEAR_DISCOVERY_PROJECT_ID,
+               kind=linear-discovery, body contains key.
+               If found, skip (already created in a prior run).
+           iii. Create the subject:
+               <SUBJECT_CREATE_INVOCATION> with:
+                 kind: linear-discovery
+                 title: punchy headline
+                 body: structured markdown with these sections in order:
+                   ## Source
+                   Transcript: <id> @ <timestamp>
+                   Quote: "<exact quoted moment>"
 
-      Step 3 — Create Linear tickets
-      For each surviving angle, call the Linear MCP to create one issue.
-      Each issue:
-        - project: LINEAR_DISCOVERY_PROJECT_ID (env)
-        - label: "Discovery"
-        - state: LINEAR_STATE_BACKLOG_ID (env)
-        - title: a punchy headline draft of the angle
-        - body: structured markdown with these sections in order:
-            ## Source
-            Transcript: <id> @ <timestamp>
-            Quote: "<exact quoted moment>"
+                   ## Suggested target keyword
+                   "<keyword>" — GSC: <volume>/mo, rank #<rank>, striking distance: <yes|no>
 
-            ## Suggested target keyword
-            "<keyword>" — GSC: <volume>/mo, rank #<rank>, striking distance: <yes|no>
+                   ## Competitive landscape
+                   - <url 1> (rank N) — <one-line characterization>
+                   - <url 2> (rank N) — <one-line characterization>
+                   - <url 3> (rank N) — <one-line characterization>
+                   GAP: <what's missing in the SERP>
 
-            ## Competitive landscape
-            - <url 1> (rank N) — <one-line characterization>
-            - <url 2> (rank N) — <one-line characterization>
-            - <url 3> (rank N) — <one-line characterization>
-            GAP: <what's missing in the SERP that we can own>
+                   ## Pre-identified citable sources
+                   - <url> — <what this supports>
+                   - <url> — <what this supports>
 
-            ## Pre-identified citable sources
-            - <url> — <what this supports>
-            - <url> — <what this supports>
+                   ## Suggested pillar
+                   <pillar from business-context.yaml>
 
-            ## Suggested pillar
-            <pillar name from business-context.yaml>
+                   ## Dedup notes
+                   <"not covered in content/manifest.json" or specific notes>
 
-            ## Dedup notes
-            <"not covered in content/manifest.json" or specific notes>
+                   ## Idempotency key
+                   <key>
+        f. AFTER all surviving angles for this transcript have been
+           created-or-confirmed-duplicate, atomically write
+           .ao/state/discovery-cursor.json with:
+             { "last_processed_id": "<this transcript's id>",
+               "last_processed_at": "<this transcript's created_at>",
+               "updated_at": "<current ISO8601>" }
 
-            ## Idempotency key
-            discovery:<transcript_id>:<8-char hash of (transcript_id + angle title)>
-
-      Before creating each issue, query Linear for any existing issue in the
-      project whose body contains the same idempotency key. If found, skip
-      that angle (already created in a prior run).
-
-      Step 4 — Emit phase result
-      Output a list of {id, title, transcript_id} for each created issue.
+      Step 3 — Emit phase result
+      Output: list of {subject_id, title, transcript_id} for each created
+      subject; transcripts_processed: count.
     capabilities:
       mutates_state: true
     output_contract:
@@ -419,43 +495,42 @@ After `transcript-fetch:` in `phases:`, append:
       fields:
         issues_created:
           type: array
-          description: Linear issues created this run
-          items:
-            type: object
         transcripts_processed:
           type: integer
-          description: Number of transcripts examined
     decision_contract:
       min_confidence: 0.5
       max_risk: low
       allow_missing_decision: true
 ```
 
-- [ ] **Step 3: Validate and compile**
+- [ ] **Step 3: Substitute the verified subject API path**
+
+Find `<SUBJECT_CREATE_INVOCATION>` and `<SUBJECT_LIST_INVOCATION>` in the directive above and replace with the actual invocation form determined in preflight Step 7.
+
+- [ ] **Step 4: Validate and compile**
 
 ```bash
 animus workflow config validate
 animus workflow config compile
 ```
-Expected: both succeed.
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add .ao/workflows/custom.yaml
-git commit -m "Add idea-strategist agent and phase with external-research gate"
+git commit -m "Add idea-strategist agent and phase; cursor advances per-transcript"
 ```
 
 ---
 
-## Task 5: Add `approval-watcher` agent + `approval-watcher` phase
+## Task 4: Add `approval-watcher` agent + phase (filter by Animus subject status)
 
 **Files:**
 - Modify: `.ao/workflows/custom.yaml`
 
-- [ ] **Step 1: Add the `approval-watcher` agent**
+**Note:** `<SUBJECT_LIST_INVOCATION>` placeholder again — replace with verified path from preflight.
 
-After the `idea-strategist:` agent block:
+- [ ] **Step 1: Add the `approval-watcher` agent**
 
 ```yaml
   approval-watcher:
@@ -463,21 +538,27 @@ After the `idea-strategist:` agent block:
     tool: claude
     mcp_servers:
     - ao
-    - linear
     system_prompt: |
-      SKILLS: Follow the linear-pack's bundled issue-management skill
-      (auto-loaded via the active pack overlay) for correct Linear MCP
-      query usage.
+      SKILLS: Follow the animus-subject-operations skill (auto-loaded)
+      for correct subject API usage and animus-queue-management for
+      enqueue semantics.
 
-      You are a polling agent. You detect Linear issues whose state has
-      changed out of Backlog and enqueue blog-from-ticket runs for them.
-      You do not reason about content. You do not modify Linear.
-      Hard rule: scope every query to LINEAR_DISCOVERY_PROJECT_ID.
+      You are a polling agent. You detect Linear-backed subjects whose
+      Animus status has become InProgress (the approval signal) and
+      enqueue blog-from-ticket runs for them. You do not reason about
+      content. You do not modify subjects.
+
+      Filter rules:
+        - Include: status == InProgress
+        - Exclude: status == Cancelled (rejected by human)
+        - Exclude: status == Done (already processed)
+        - Exclude: status == Blocked (human attention needed elsewhere)
+        - Exclude: status == Ready (no transition yet)
+
+      Hard rule: scope every query to project = LINEAR_DISCOVERY_PROJECT_ID.
 ```
 
 - [ ] **Step 2: Add the `approval-watcher` phase**
-
-After `idea-strategist:` in `phases:`:
 
 ```yaml
   approval-watcher:
@@ -485,43 +566,33 @@ After `idea-strategist:` in `phases:`:
     agent: approval-watcher
     directive: |
       Step 1 — Read seen set
+      mkdir -p .ao/state
       Read .ao/state/approval-seen.json. If missing, treat as
-      {"issues": [], "updated_at": null}.
+      {"subject_ids": [], "updated_at": null}.
 
-      Step 2 — Query Linear (scoped to project)
-      Use the Linear MCP to query issues where ALL of:
-        - project.id = LINEAR_DISCOVERY_PROJECT_ID
-        - labels contains "Discovery"
-        - state.type != "backlog"
-      Return: id, identifier, title, description, labels, state.name.
+      Step 2 — List subjects (scoped, filtered)
+      <SUBJECT_LIST_INVOCATION> with:
+        - kind: linear-discovery
+        - project_id: LINEAR_DISCOVERY_PROJECT_ID
+        - status: InProgress
+      Return: subject_id, title.
 
       Step 3 — Diff against seen
-      Filter out any issue.id already in the seen set.
+      Filter out any subject_id already in the seen set.
 
-      Step 4 — Enqueue per newly-approved issue
-      For each new issue, parse the body to extract:
-        - suggested_pillar (from "## Suggested pillar" section)
-        - suggested_keyword (from "## Suggested target keyword" section,
-          first quoted string)
-        - pre_identified_sources (from "## Pre-identified citable sources"
-          section as a list of {url, supports})
-      Call animus_queue_enqueue with:
+      Step 4 — Enqueue per newly-approved subject
+      For each, call animus_queue_enqueue with EXACTLY:
         workflow_ref: blog-from-ticket
-        input: {
-          linear_issue_id: <id>,
-          linear_identifier: <identifier>,
-          title: <title>,
-          body: <description>,
-          labels: <labels>,
-          suggested_pillar: <parsed>,
-          suggested_keyword: <parsed>,
-          pre_identified_sources: <parsed>
-        }
+        input: { subject_id: "<id>", subject_kind: "linear-discovery" }
+      (Use the subject-id wire format determined in preflight Step 9.)
+      No body / labels / pre-extracted fields — those are re-fetched in
+      ticket-to-brief, so humans can edit the issue between approval
+      and processing.
 
       Step 5 — Update seen set (atomic)
-      Append every successfully-enqueued issue.id to the seen list.
-      Write .ao/state/approval-seen.json atomically (write tmpfile,
-      then rename). updated_at = current ISO8601.
+      Append every successfully-enqueued subject_id to the seen list.
+      Write .ao/state/approval-seen.json via tmpfile + rename.
+      updated_at = current ISO8601.
 
       Step 6 — Verdict
       If nothing newly approved, emit skip with reason "no_approvals".
@@ -535,137 +606,15 @@ After `idea-strategist:` in `phases:`:
       fields:
         enqueued:
           type: array
-          description: Issues enqueued this run
-          items:
-            type: object
     decision_contract:
       min_confidence: 0.5
       max_risk: low
       allow_missing_decision: true
 ```
 
-- [ ] **Step 3: Validate and compile**
+- [ ] **Step 3: Substitute the verified subject API path**
 
-```bash
-animus workflow config validate
-animus workflow config compile
-```
-
-- [ ] **Step 4: Commit**
-
-```bash
-git add .ao/workflows/custom.yaml
-git commit -m "Add approval-watcher agent and phase scoped to discovery project"
-```
-
----
-
-## Task 6: Add `linear-coordinator` agent + `ticket-acknowledge` and `linear-finalize` phases
-
-**Files:**
-- Modify: `.ao/workflows/custom.yaml`
-
-- [ ] **Step 1: Add the `linear-coordinator` agent**
-
-After the `approval-watcher:` agent block:
-
-```yaml
-  linear-coordinator:
-    model: claude-haiku-4-5
-    tool: claude
-    mcp_servers:
-    - linear
-    system_prompt: |
-      SKILLS: Follow the linear-pack's bundled issue-management skill
-      (auto-loaded via the active pack overlay) for correct Linear MCP
-      comment/transition tool usage.
-
-      You manage Linear ticket state and comments for blog-from-ticket
-      runs. You do not generate content. Two modes:
-      - "acknowledge": post a start comment, transition to In Progress.
-      - "finalize": post a completion comment with branch + summary,
-        transition to In Review.
-      Each invocation receives its mode via the phase directive.
-```
-
-- [ ] **Step 2: Add `ticket-acknowledge` phase**
-
-In `phases:`, after the `news-scan:` block (or after the most recently-added phase):
-
-```yaml
-  ticket-acknowledge:
-    mode: agent
-    agent: linear-coordinator
-    directive: |
-      Mode: acknowledge.
-
-      Input: linear_issue_id, linear_identifier (from queue payload).
-      Also available: the current Animus run_id (animus.run.id) and the
-      current branch name (call `git rev-parse --abbrev-ref HEAD`).
-
-      Actions:
-      1. Post a Linear comment on linear_issue_id:
-         "🤖 Blog generation started.
-         Run: <run_id>
-         Branch: <branch>"
-      2. Transition the issue's state to LINEAR_STATE_IN_PROGRESS_ID.
-
-      Output: pass-through of linear_issue_id, linear_identifier for
-      downstream phases that need to thread it.
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: phase_result
-      required_fields:
-      - linear_issue_id
-      fields:
-        linear_issue_id:
-          type: string
-        linear_identifier:
-          type: string
-```
-
-- [ ] **Step 3: Add `linear-finalize` phase**
-
-Below `ticket-acknowledge:`:
-
-```yaml
-  linear-finalize:
-    mode: agent
-    agent: linear-coordinator
-    directive: |
-      Mode: finalize.
-
-      Input from prior phases: linear_issue_id, slug, word_count,
-      branch (read with `git rev-parse --abbrev-ref HEAD`),
-      commit_message from seo-review, featuredImage path.
-
-      Read content/<slug>.md frontmatter to fetch title and meta_description.
-
-      Actions:
-      1. Post a Linear comment on linear_issue_id with body:
-         "✅ Blog draft ready for review.
-         Title: <title>
-         Slug: <slug>
-         Word count: <word_count>
-         Branch: <branch>
-         Meta description: <meta_description>
-         Featured image: assets/<slug>.webp"
-      2. Transition the issue's state to LINEAR_STATE_IN_REVIEW_ID.
-
-      Output: confirmation only.
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: phase_result
-      required_fields:
-      - linear_issue_id
-      fields:
-        linear_issue_id:
-          type: string
-        comment_id:
-          type: string
-```
+Replace `<SUBJECT_LIST_INVOCATION>`.
 
 - [ ] **Step 4: Validate and compile**
 
@@ -678,25 +627,162 @@ animus workflow config compile
 
 ```bash
 git add .ao/workflows/custom.yaml
-git commit -m "Add linear-coordinator agent with acknowledge and finalize phases"
+git commit -m "Add approval-watcher filtering by Animus status==InProgress, enqueueing subject_id only"
 ```
 
 ---
 
-## Task 7: Add `ticket-to-brief` phase + extend `content-strategist`
+## Task 5: Add `linear-coordinator` agent + `ticket-acknowledge` / `linear-finalize` phases
 
 **Files:**
-- Modify: `.ao/workflows/custom.yaml` (content-strategist agent + new phase)
+- Modify: `.ao/workflows/custom.yaml`
+
+**Note:** uses `<SUBJECT_COMMENT_INVOCATION>` and `<SUBJECT_UPDATE_INVOCATION>` placeholders — replace from preflight.
+
+- [ ] **Step 1: Add the `linear-coordinator` agent**
+
+```yaml
+  linear-coordinator:
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers:
+    - ao
+    system_prompt: |
+      SKILLS: Follow the animus-subject-operations skill (auto-loaded)
+      for correct subject API usage.
+
+      You manage Linear ticket comments (and optionally status) for
+      blog-from-ticket runs. Two modes via the phase directive:
+      - "acknowledge": post a start comment. DO NOT transition status
+        — the human already moved to InProgress by approving.
+      - "finalize": post a rich completion comment. Transition status
+        only if LINEAR_FINALIZE_TRANSITION env var is set to "Done";
+        otherwise leave status alone (the human moves to their
+        team's preferred review state).
+```
+
+- [ ] **Step 2: Add `ticket-acknowledge` phase**
+
+```yaml
+  ticket-acknowledge:
+    mode: agent
+    agent: linear-coordinator
+    directive: |
+      Mode: acknowledge.
+
+      Input from queue: subject_id (and subject_kind if separate).
+      Read the Animus run_id from the runtime context. Read the current
+      branch via `git rev-parse --abbrev-ref HEAD`.
+
+      Action:
+        <SUBJECT_COMMENT_INVOCATION> on subject_id with body:
+          "🤖 Blog generation started.
+           Run: <run_id>
+           Branch: <branch>"
+
+      DO NOT transition status. The human already did that.
+
+      Output: pass-through of subject_id for downstream phases.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - subject_id
+      fields:
+        subject_id:
+          type: string
+```
+
+- [ ] **Step 3: Add `linear-finalize` phase**
+
+```yaml
+  linear-finalize:
+    mode: agent
+    agent: linear-coordinator
+    directive: |
+      Mode: finalize.
+
+      Input from prior phases:
+        - subject_id
+        - slug (from seo-review / content-writing)
+        - branch (read via `git rev-parse --abbrev-ref HEAD`)
+        - commit_message (from seo-review or register-post)
+
+      Read content/<slug>.md frontmatter for title + meta_description.
+      Read content/manifest.json's entry for this slug for any extra
+      metadata (the entry was just written by register-post).
+
+      Action 1 — Post completion comment:
+        <SUBJECT_COMMENT_INVOCATION> on subject_id with body:
+          "✅ Blog draft ready for review.
+           Title: <title>
+           Slug: <slug>
+           Word count: <word_count from manifest>
+           Branch: <branch>
+           Meta description: <meta_description>
+           Featured image: assets/<slug>.webp"
+
+      Action 2 — Optional status transition:
+        If env var LINEAR_FINALIZE_TRANSITION == "Done":
+          <SUBJECT_UPDATE_INVOCATION> on subject_id with status=Done
+        Else:
+          Leave status untouched. The human moves the issue to their
+          team's preferred In Review / QA / etc. state manually.
+
+      Note: granular Linear-state-name transitions (e.g. "In Review"
+      specifically) are NOT expressible through the subject API's
+      5-status abstraction. If the team needs that, set
+      LINEAR_FINALIZE_TRANSITION to a special value and have this
+      phase call `animus plugin call --name animus-subject-linear
+      --method subject.set_state_by_name ...` directly (verify whether
+      the plugin exposes such a method during preflight).
+
+      Output: confirmation.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - subject_id
+      fields:
+        subject_id:
+          type: string
+        comment_id:
+          type: string
+```
+
+- [ ] **Step 4: Substitute the verified subject API paths**
+
+Replace `<SUBJECT_COMMENT_INVOCATION>` and `<SUBJECT_UPDATE_INVOCATION>` in both phases.
+
+- [ ] **Step 5: Validate and compile**
+
+```bash
+animus workflow config validate
+animus workflow config compile
+```
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add .ao/workflows/custom.yaml
+git commit -m "Add linear-coordinator with ack/finalize; finalize transition is opt-in"
+```
+
+---
+
+## Task 6: Add `ticket-to-brief` phase + extend `content-strategist`
+
+**Files:**
+- Modify: `.ao/workflows/custom.yaml`
 
 - [ ] **Step 1: Extend `content-strategist` mcp_servers**
 
-Locate the existing `content-strategist:` agent block (around line 103-118). Replace its `mcp_servers:` list:
+Locate the existing `content-strategist:` agent block. Replace its `mcp_servers:` list:
 
 Before:
 ```yaml
-  content-strategist:
-    model: claude-sonnet-4-6
-    tool: claude
     mcp_servers:
     - ao
     - exa
@@ -706,11 +792,8 @@ Before:
     - search-console
 ```
 
-After:
+After (add `content-library`; **do NOT add `linear`** — subject access goes through `ao`):
 ```yaml
-  content-strategist:
-    model: claude-sonnet-4-6
-    tool: claude
     mcp_servers:
     - ao
     - exa
@@ -718,51 +801,58 @@ After:
     - brave
     - firecrawl
     - search-console
-    - linear
     - content-library
 ```
 
-The system_prompt stays the same — the new MCP availability is opt-in per directive.
-
 - [ ] **Step 2: Add `ticket-to-brief` phase**
-
-In `phases:`, below `linear-finalize:`:
 
 ```yaml
   ticket-to-brief:
     mode: agent
     agent: content-strategist
     directive: |
-      Convert an approved Linear discovery ticket into a topic_brief that
-      matches the contract the existing pipeline already consumes.
+      Convert an approved Linear-backed subject into a topic_brief
+      matching the contract today's research-collection consumes.
 
-      Input: linear_issue_id, linear_identifier, suggested_pillar,
-      suggested_keyword, pre_identified_sources (from queue payload).
+      Input from queue: subject_id (and subject_kind).
 
-      Step 1 — Read context
+      Step 1 — Re-fetch the subject (mandatory)
+      <SUBJECT_GET_INVOCATION> by subject_id to get the LATEST title,
+      body, comments, status. Humans may have edited any of these
+      between approval and now — re-fetch is non-negotiable.
+
       Read business-context.yaml. Read content/manifest.json.
-      Use Linear MCP to fetch the LATEST version of the issue body
-      (humans may have edited it during review).
 
-      Step 2 — Refine keyword
+      Step 2 — Parse the body
+      Extract from the body sections (which the strategist wrote
+      originally but humans may have edited):
+        - suggested_pillar (from "## Suggested pillar")
+        - suggested_keyword (from "## Suggested target keyword",
+          first quoted string)
+        - pre_identified_sources (from "## Pre-identified citable
+          sources" as list of {url, supports})
+        - source_transcript_id (from "## Source")
+
+      Step 3 — Refine keyword
       Validate suggested_keyword via Search Console. If GSC suggests a
-      better-shaped variant (e.g. higher volume, shorter striking-distance
-      gap), prefer it. Record which one you chose and why.
+      better-shaped variant, prefer it; record why.
 
-      Step 3 — Build topic_brief
-      Emit the same shape today's topic-research phase produces:
-        - target_keyword: <refined keyword>
+      Step 4 — Build topic_brief
+      Emit the same shape today's topic-research produces:
+        - target_keyword: <refined>
         - content_pillar: <suggested_pillar or refined>
-        - word_count_target: <estimate from angle complexity, 1200-2500>
-        - unique_angle: <the angle, including the source-transcript context>
+        - word_count_target: <1200-2500 by angle complexity>
+        - unique_angle: <the angle including transcript context>
         - data_sources_needed: <list — start from pre_identified_sources,
-          add any gaps the brief reveals>
+          add gaps>
         - internal_link_targets: <query content-library + manifest;
-          pick 2-3 candidate slugs of related published posts>
-        - linear_issue_id: <pass through for downstream phases>
+          2-3 candidate slugs>
+        - subject_id: <pass through>
+        - linear_issue_identifier: <Linear identifier like BLG-105
+          for human-readable display in subsequent commit messages>
+        - source_transcript_id: <pass through>
 
-      Do NOT do deep external research here — that's research-collection's
-      job. This phase is brief synthesis only.
+      Do NOT do deep external research here. research-collection's job.
     capabilities:
       mutates_state: false
     output_contract:
@@ -772,39 +862,42 @@ In `phases:`, below `linear-finalize:`:
       fields:
         topic_brief:
           type: object
-          description: Brief consumed by research-collection
         target_keyword:
           type: string
         content_pillar:
           type: string
-        linear_issue_id:
+        subject_id:
+          type: string
+        source_transcript_id:
           type: string
 ```
 
-- [ ] **Step 3: Validate and compile**
+- [ ] **Step 3: Substitute `<SUBJECT_GET_INVOCATION>`**
+
+Replace with the verified subject-get path from preflight Step 7.
+
+- [ ] **Step 4: Validate and compile**
 
 ```bash
 animus workflow config validate
 animus workflow config compile
 ```
 
-- [ ] **Step 4: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add .ao/workflows/custom.yaml
-git commit -m "Add ticket-to-brief phase; extend content-strategist with linear + content-library"
+git commit -m "Add ticket-to-brief re-fetching subject body; extend content-strategist with content-library"
 ```
 
 ---
 
-## Task 8: Extend `content-writer` with content-library MCP
+## Task 7: Extend `content-writer` with content-library MCP
 
 **Files:**
 - Modify: `.ao/workflows/custom.yaml`
 
 - [ ] **Step 1: Add `content-library` to `content-writer` mcp_servers**
-
-Locate the `content-writer:` agent block (around line 130). Replace:
 
 Before:
 ```yaml
@@ -823,50 +916,40 @@ After:
     - content-library
 ```
 
-- [ ] **Step 2: Append internal-link guidance to `content-writer`'s system_prompt**
+- [ ] **Step 2: Update the internal-link guidance in the system_prompt**
 
-In the same `content-writer:` block, find the line in the system_prompt that says:
+Find:
 ```
       Internal links to 2-3 related blog posts.
 ```
 
-Replace it with:
+Replace with:
 ```
       Internal links to 2-3 related blog posts. Source candidates by
       querying content-library MCP and reading content/manifest.json.
       Use real slugs of published posts. Do not invent slugs.
 ```
 
-- [ ] **Step 3: Validate and compile**
+- [ ] **Step 3: Validate, compile, commit**
 
 ```bash
 animus workflow config validate
 animus workflow config compile
-```
-
-- [ ] **Step 4: Commit**
-
-```bash
 git add .ao/workflows/custom.yaml
 git commit -m "Extend content-writer with content-library MCP for real internal-link slugs"
 ```
 
 ---
 
-## Task 9: Extend `seo-optimizer` with content-library MCP
+## Task 8: Extend `seo-optimizer` with content-library MCP
 
 **Files:**
 - Modify: `.ao/workflows/custom.yaml`
 
 - [ ] **Step 1: Add `content-library` to `seo-optimizer` mcp_servers**
 
-Locate the `seo-optimizer:` agent block (around line 156). Replace:
-
 Before:
 ```yaml
-  seo-optimizer:
-    model: claude-sonnet-4-6
-    tool: claude
     mcp_servers:
     - search-console
     - firecrawl
@@ -874,18 +957,15 @@ Before:
 
 After:
 ```yaml
-  seo-optimizer:
-    model: claude-sonnet-4-6
-    tool: claude
     mcp_servers:
     - search-console
     - firecrawl
     - content-library
 ```
 
-- [ ] **Step 2: Append internal-link verification to `seo-optimizer`'s system_prompt**
+- [ ] **Step 2: Update the internal-link verification line**
 
-In the same block's system_prompt, find:
+Find:
 ```
       - Internal links to 2-3 related blog posts (not service pages)
 ```
@@ -893,51 +973,38 @@ In the same block's system_prompt, find:
 Replace with:
 ```
       - Internal links to 2-3 related blog posts (not service pages).
-        Verify each internal-link slug exists via content-library MCP
-        or content/manifest.json. Drop and replace any broken slug.
+        Verify each slug exists via content-library MCP or
+        content/manifest.json. Drop and replace any broken slug.
 ```
 
-- [ ] **Step 3: Validate and compile**
+- [ ] **Step 3: Validate, compile, commit**
 
 ```bash
 animus workflow config validate
 animus workflow config compile
-```
-
-- [ ] **Step 4: Commit**
-
-```bash
 git add .ao/workflows/custom.yaml
 git commit -m "Extend seo-optimizer with content-library MCP for internal-link verification"
 ```
 
 ---
 
-## Task 10: TDD the `register-post.sh` script
+## Task 9: TDD the `register-post.sh` script
 
 **Files:**
 - Create: `scripts/register-post.sh`
 - Create: `scripts/test/register-post.bats`
 
-The script parses YAML frontmatter from `content/<slug>.md`, builds a manifest entry, atomically appends to `content/manifest.json`, and commits. We TDD it with `bats-core`.
+The script parses YAML frontmatter from `content/<slug>.md`, builds a manifest entry, atomically appends to `content/manifest.json`, and commits. We TDD it with `bats-core`. Script-side behavior is unchanged from the prior plan revision — only the phase that *calls* it changes (Task 10).
 
-- [ ] **Step 1: Install bats locally if not present**
+- [ ] **Step 1: Install bats / yq / jq if missing**
 
-Run:
 ```bash
 which bats || brew install bats-core
-```
-Expected: `bats` resolves to a path. (If `brew` isn't available, install bats via npm: `npm install -g bats`.)
-
-- [ ] **Step 2: Verify `yq` and `jq` are available**
-
-Run:
-```bash
 which yq && which jq
 ```
-Expected: both resolve. If `yq` is missing: `brew install yq`. If `jq` is missing: `brew install jq`.
+Expected: all three resolve.
 
-- [ ] **Step 3: Write the failing test file**
+- [ ] **Step 2: Write the failing test file**
 
 Create `scripts/test/register-post.bats`:
 
@@ -1033,14 +1100,12 @@ EOF
   [ "$output" = "1" ]
 }
 
-@test "writes atomically (no partial manifest on jq failure)" {
+@test "writes atomically (no partial manifest on parse failure)" {
   write_post "atomic-post"
   ./scripts/register-post.sh atomic-post
-  # Manually corrupt frontmatter then re-run; manifest should be unchanged
   echo "broken" > content/atomic-post.md
   run ./scripts/register-post.sh atomic-post
   [ "$status" -ne 0 ]
-  # Manifest still has one valid entry (the original)
   run jq '.posts | length' content/manifest.json
   [ "$output" = "1" ]
 }
@@ -1052,23 +1117,25 @@ EOF
   [[ "$output" == *"Register commit-post"* ]]
 }
 
-@test "uses linear_issue_id and source_transcript_id from env if set" {
+@test "uses LINEAR_SUBJECT_ID and SOURCE_TRANSCRIPT_ID from env if set" {
   write_post "env-post"
-  LINEAR_ISSUE_ID="BLG-42" SOURCE_TRANSCRIPT_ID="krisp-xyz" \
+  LINEAR_SUBJECT_ID="linear-discovery:BLG-42" SOURCE_TRANSCRIPT_ID="krisp-xyz" \
     ./scripts/register-post.sh env-post
-  run jq -r '.posts[0].linear_ticket_id' content/manifest.json
-  [ "$output" = "BLG-42" ]
+  run jq -r '.posts[0].linear_subject_id' content/manifest.json
+  [ "$output" = "linear-discovery:BLG-42" ]
   run jq -r '.posts[0].source_transcript_id' content/manifest.json
   [ "$output" = "krisp-xyz" ]
 }
 ```
 
-- [ ] **Step 4: Run the tests — verify they fail (script doesn't exist yet)**
+- [ ] **Step 3: Run the tests — verify they fail**
 
-Run: `bats scripts/test/register-post.bats`
-Expected: all 7 tests fail with "no such file or directory" for `scripts/register-post.sh`.
+```bash
+bats scripts/test/register-post.bats
+```
+Expected: all 7 tests fail (script doesn't exist).
 
-- [ ] **Step 5: Write the script**
+- [ ] **Step 4: Write the script**
 
 Create `scripts/register-post.sh`:
 
@@ -1077,7 +1144,7 @@ Create `scripts/register-post.sh`:
 # register-post.sh — Append a post entry to content/manifest.json
 #
 # Usage: ./scripts/register-post.sh <slug>
-# Optional env: LINEAR_ISSUE_ID, SOURCE_TRANSCRIPT_ID, BRANCH
+# Optional env: LINEAR_SUBJECT_ID, SOURCE_TRANSCRIPT_ID, BRANCH
 
 set -euo pipefail
 
@@ -1087,11 +1154,9 @@ MANIFEST="content/manifest.json"
 
 [ -f "$POST_FILE" ] || { echo "post not found: $POST_FILE" >&2; exit 1; }
 
-# Extract frontmatter (between first two '---' lines)
 FM="$(awk '/^---$/{c++; next} c==1{print}' "$POST_FILE")"
 [ -n "$FM" ] || { echo "no frontmatter found in $POST_FILE" >&2; exit 1; }
 
-# Parse fields via yq — bail if any required field is missing/empty
 title="$(echo "$FM" | yq -r '.title // ""')"
 [ -n "$title" ] || { echo "frontmatter missing title" >&2; exit 1; }
 pillar="$(echo "$FM" | yq -r '.content_pillar // ""')"
@@ -1101,24 +1166,20 @@ excerpt="$(echo "$FM" | yq -r '.excerpt // ""')"
 date_str="$(echo "$FM" | yq -r '.date // ""')"
 tags_json="$(echo "$FM" | yq -o=json '.keywords // []')"
 
-# Optional env passthroughs
-LINEAR_ISSUE_ID="${LINEAR_ISSUE_ID:-}"
+LINEAR_SUBJECT_ID="${LINEAR_SUBJECT_ID:-}"
 SOURCE_TRANSCRIPT_ID="${SOURCE_TRANSCRIPT_ID:-}"
 BRANCH="${BRANCH:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")}"
 
-# Bootstrap manifest if missing
 if [ ! -f "$MANIFEST" ]; then
   echo '{"version":1,"posts":[]}' > "$MANIFEST"
 fi
 
-# Idempotency — skip if slug already present
 existing="$(jq --arg s "$SLUG" '[.posts[] | select(.slug == $s)] | length' "$MANIFEST")"
 if [ "$existing" -gt 0 ]; then
   echo "manifest already contains slug: $SLUG (skipping)" >&2
   exit 0
 fi
 
-# Build the new entry
 NEW_ENTRY="$(jq -n \
   --arg slug "$SLUG" \
   --arg title "$title" \
@@ -1127,7 +1188,7 @@ NEW_ENTRY="$(jq -n \
   --arg target_keyword "$target_keyword" \
   --argjson word_count "$word_count" \
   --arg summary "$excerpt" \
-  --arg linear_ticket_id "$LINEAR_ISSUE_ID" \
+  --arg linear_subject_id "$LINEAR_SUBJECT_ID" \
   --arg source_transcript_id "$SOURCE_TRANSCRIPT_ID" \
   --arg branch "$BRANCH" \
   --argjson tags "$tags_json" \
@@ -1140,97 +1201,107 @@ NEW_ENTRY="$(jq -n \
     tags: $tags,
     word_count: $word_count,
     summary: $summary,
-    linear_ticket_id: $linear_ticket_id,
+    linear_subject_id: $linear_subject_id,
     source_transcript_id: $source_transcript_id,
     branch: $branch
   }')"
 
-# Atomic write: tmpfile + rename
 TMP="$(mktemp "${MANIFEST}.XXXXXX")"
 jq --argjson entry "$NEW_ENTRY" '.posts += [$entry]' "$MANIFEST" > "$TMP"
 mv "$TMP" "$MANIFEST"
 
-# Commit
 git add "$MANIFEST"
 git commit -m "Register ${SLUG} in content manifest" --quiet
 ```
 
-- [ ] **Step 6: Mark executable and rerun tests**
+- [ ] **Step 5: Rerun tests**
 
-Run:
 ```bash
 chmod +x scripts/register-post.sh
 bats scripts/test/register-post.bats
 ```
 Expected: all 7 tests pass.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add scripts/register-post.sh scripts/test/register-post.bats
-git commit -m "Add register-post.sh with bats coverage for manifest append"
+git commit -m "Add register-post.sh with bats coverage; env: LINEAR_SUBJECT_ID, SOURCE_TRANSCRIPT_ID"
 ```
 
 ---
 
-## Task 11: Add `register-post` phase (command mode)
+## Task 10: Add `register-post` phase as an AGENT phase (not command)
 
 **Files:**
 - Modify: `.ao/workflows/custom.yaml`
 
-- [ ] **Step 1: Add the `register-post` phase**
+The original plan made `register-post` a command phase relying on `SLUG` flowing in as an env var — which assumes Animus has a clean mechanism for env-passing into command phases (unverified). Switching to a tiny agent phase makes the input-reading explicit and matches how every other phase in this workflow reads prior phase outputs.
 
-In `phases:`, after `ticket-to-brief:`:
+- [ ] **Step 1: Add the `register-post-runner` agent**
+
+```yaml
+  register-post-runner:
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: []
+    system_prompt: |
+      You are a one-shot script runner. Your only job: extract `slug`
+      (and optionally `linear_subject_id`, `source_transcript_id`) from
+      the prior phase's output, then run scripts/register-post.sh with
+      those as env vars. Return the script's commit message.
+```
+
+- [ ] **Step 2: Add the `register-post` phase**
 
 ```yaml
   register-post:
-    mode: command
-    directive: Append the new post to content/manifest.json and commit
-    command:
-      program: bash
-      args:
-      - -c
-      - |
-        # Reads slug from phase input (or env passthrough).
-        # Optional: LINEAR_ISSUE_ID, SOURCE_TRANSCRIPT_ID provided by prior phases.
-        SLUG="${SLUG:?slug required}"
-        ./scripts/register-post.sh "$SLUG"
-      cwd_mode: task_root
-      timeout_secs: 30
+    mode: agent
+    agent: register-post-runner
+    directive: |
+      Read the prior phase's output to find:
+        - slug (required; emitted by seo-review or content-writing)
+        - linear_subject_id (optional; threaded from queue payload
+          through ticket-to-brief's topic_brief)
+        - source_transcript_id (optional; threaded from topic_brief)
+
+      Run:
+        env LINEAR_SUBJECT_ID="<linear_subject_id or empty>" \
+            SOURCE_TRANSCRIPT_ID="<source_transcript_id or empty>" \
+            bash scripts/register-post.sh "<slug>"
+
+      Capture the commit message from stdout (the script logs it).
+      Output: commit_message.
     capabilities:
       mutates_state: true
     output_contract:
       kind: implementation_result
       required_fields:
       - commit_message
+      fields:
+        commit_message:
+          type: string
 ```
 
-Note: how phase inputs flow to env vars depends on Animus's command-phase input plumbing. The implementer should verify the convention by checking the existing `commit-draft` and `push-branch` phases — those are also `mode: command` and successfully accept implicit inputs. If env-passthrough doesn't work cleanly, switch the directive to a tiny agent phase that calls the same script.
-
-- [ ] **Step 2: Validate and compile**
+- [ ] **Step 3: Validate, compile, commit**
 
 ```bash
 animus workflow config validate
 animus workflow config compile
-```
-
-- [ ] **Step 3: Commit**
-
-```bash
 git add .ao/workflows/custom.yaml
-git commit -m "Add register-post phase invoking the manifest script"
+git commit -m "Add register-post as agent phase (reads slug from prior output)"
 ```
 
 ---
 
-## Task 12: Define the three new workflows + retrofit `blog-production`
+## Task 11: Define the three new workflows + retrofit `blog-production` (with revised register-post placement)
 
 **Files:**
 - Modify: `.ao/workflows/custom.yaml` (workflows block)
 
-- [ ] **Step 1: Retrofit `register-post` into `blog-production`**
+- [ ] **Step 1: Retrofit `register-post` into `blog-production` as the LAST phase**
 
-Find the existing `blog-production` workflow block (around line 590). Replace its phases list:
+Locate `blog-production`. Replace its `phases:` list:
 
 Before:
 ```yaml
@@ -1259,33 +1330,33 @@ After:
   - content-writing
   - commit-draft
   - seo-review
-  - register-post
   - asset-generation
   - social-excerpts
   - push-branch
+  - register-post           # ← inserted as LAST phase; manifest = post on origin
 ```
 
 - [ ] **Step 2: Add the three new workflows**
 
-After the existing `news-monitor` workflow block (around line 622) and before the `# ── Schedules` comment, insert:
+After the existing `news-monitor` block:
 
 ```yaml
 - id: idea-discovery
   name: Transcript-Driven Idea Discovery
-  description: Poll Krisp transcripts and propose blog ideas as Linear tickets
+  description: Poll Krisp transcripts and propose blog ideas as Linear-backed subjects
   phases:
   - transcript-fetch
   - idea-strategist
 
 - id: approval-watch
   name: Linear Approval Watcher
-  description: Poll Linear for approved discovery tickets and enqueue blog-from-ticket
+  description: Poll Linear-backed subjects for InProgress status and enqueue blog-from-ticket
   phases:
   - approval-watcher
 
 - id: blog-from-ticket
-  name: Blog Generation from Approved Linear Ticket
-  description: Generate a blog post from a human-approved Linear discovery ticket
+  name: Blog Generation from Approved Linear Subject
+  description: Generate a blog post from a human-approved Linear discovery subject
   phases:
   - ticket-acknowledge
   - ticket-to-brief
@@ -1293,51 +1364,39 @@ After the existing `news-monitor` workflow block (around line 622) and before th
   - content-writing
   - commit-draft
   - seo-review
-  - register-post
   - asset-generation
   - social-excerpts
   - push-branch
+  - register-post           # ← after push-branch, before finalize
   - linear-finalize
 ```
 
-- [ ] **Step 3: Validate and compile**
+- [ ] **Step 3: Validate, compile, list**
 
 ```bash
 animus workflow config validate
 animus workflow config compile
+animus workflow list
 ```
+Expected: 7 workflows total (4 existing + 3 new).
 
-- [ ] **Step 4: Verify all four workflows are registered**
-
-Run: `animus workflow list`
-Expected output includes:
-```
-blog-production
-refresh-cycle
-image-refresh
-news-monitor
-idea-discovery
-approval-watch
-blog-from-ticket
-```
-
-- [ ] **Step 5: Commit**
+- [ ] **Step 4: Commit**
 
 ```bash
 git add .ao/workflows/custom.yaml
-git commit -m "Define idea-discovery, approval-watch, blog-from-ticket workflows; retrofit register-post into blog-production"
+git commit -m "Define discovery + approval-watch + blog-from-ticket workflows; register-post is last phase in both blog workflows"
 ```
 
 ---
 
-## Task 13: Add new schedules
+## Task 12: Add new schedules
 
 **Files:**
-- Modify: `.ao/workflows/custom.yaml` (schedules block at the very bottom)
+- Modify: `.ao/workflows/custom.yaml` (schedules block)
 
 - [ ] **Step 1: Add `discovery` and `approval-watch` schedules**
 
-Locate the `schedules:` block at the bottom of the file. After the existing `news` schedule, append:
+After the existing `news` schedule:
 
 ```yaml
 - id: discovery
@@ -1350,54 +1409,53 @@ Locate the `schedules:` block at the bottom of the file. After the existing `new
   enabled: true
 ```
 
-- [ ] **Step 2: Validate and compile**
+- [ ] **Step 2: Validate, compile, commit**
 
 ```bash
 animus workflow config validate
 animus workflow config compile
-```
-
-- [ ] **Step 3: Verify schedules are registered**
-
-Run: `animus workflow config get` (or whichever subcommand surfaces the schedules — check with `animus workflow config --help`).
-Expected: the two new schedule IDs appear with the correct cron strings.
-
-- [ ] **Step 4: Commit**
-
-```bash
 git add .ao/workflows/custom.yaml
 git commit -m "Schedule discovery (daily 7am) and approval-watch (every 15 min)"
 ```
 
 ---
 
-## Task 14: Dry-run smoke tests (config-level, no live MCP calls required)
-
-This task verifies the workflows compile, phases render, and prompts look right. It does NOT exercise the actual MCP servers (those need real credentials).
+## Task 13: Smoke tests using verified CLI commands
 
 **Files:** none modified.
 
 - [ ] **Step 1: Compile-clean check**
 
-Run: `animus workflow config compile`
-Expected: succeeds with no warnings about unresolved references.
+```bash
+animus workflow config compile
+```
+Expected: succeeds with no warnings.
 
-- [ ] **Step 2: Render the prompt for `idea-strategist` phase**
+- [ ] **Step 2: Render the `idea-strategist` phase prompt**
 
-Run: `animus workflow prompt --phase idea-strategist --workflow idea-discovery`
-Expected: a fully-rendered prompt block, no template placeholders left raw, business-context.yaml + manifest references intact.
+```bash
+animus workflow prompt render \
+  --workflow-ref idea-discovery \
+  --phase idea-strategist
+```
+Expected: fully-rendered prompt block, no template placeholders left raw, business-context.yaml + manifest references intact.
 
-(If the `animus workflow prompt` subcommand uses different flag names, check `animus workflow prompt --help` and adapt.)
+- [ ] **Step 3: Render the `ticket-to-brief` phase prompt**
 
-- [ ] **Step 3: Render the prompt for `ticket-to-brief` phase**
+```bash
+animus workflow prompt render \
+  --workflow-ref blog-from-ticket \
+  --phase ticket-to-brief
+```
 
-Run: `animus workflow prompt --phase ticket-to-brief --workflow blog-from-ticket`
-Expected: rendered cleanly.
+- [ ] **Step 4: Render every phase of `blog-from-ticket` to inspect order**
 
-- [ ] **Step 4: Verify `blog-from-ticket` phase order**
-
-Run: `animus workflow get blog-from-ticket`
-Expected: phases listed in this order:
+```bash
+animus workflow prompt render \
+  --workflow-ref blog-from-ticket \
+  --all-phases
+```
+Expected: phases render in this order:
 ```
 1. ticket-acknowledge
 2. ticket-to-brief
@@ -1405,75 +1463,85 @@ Expected: phases listed in this order:
 4. content-writing
 5. commit-draft
 6. seo-review
-7. register-post
-8. asset-generation
-9. social-excerpts
-10. push-branch
-11. linear-finalize
-```
-
-- [ ] **Step 5: Verify `blog-production` has `register-post` between `seo-review` and `asset-generation`**
-
-Run: `animus workflow get blog-production`
-Expected: phases listed in order:
-```
-1. topic-research
-2. research-collection
-3. content-writing
-4. commit-draft
-5. seo-review
-6. register-post
 7. asset-generation
 8. social-excerpts
 9. push-branch
+10. register-post
+11. linear-finalize
 ```
 
-- [ ] **Step 6: Verify all new mcp_servers are declared**
+- [ ] **Step 5: Confirm subject backend ping**
 
-Run: `grep -E "^\s+(krisp|linear|content-library):" .ao/workflows/custom.yaml`
-Expected: each name appears once.
+```bash
+animus plugin ping --name animus-subject-linear
+```
+Expected: handshake + ping succeed.
 
-- [ ] **Step 7: Verify state dir is gitignored**
+- [ ] **Step 6: Confirm MCP server declarations**
 
-Run: `git check-ignore .ao/state/anything`
-Expected: prints `.ao/state/anything` (meaning it IS ignored).
+```bash
+grep -E "^\s+(krisp|content-library):" .ao/workflows/custom.yaml
+```
+Expected: each appears once. `linear:` should NOT appear under `mcp_servers:` (it's under `subjects:` now).
 
-- [ ] **Step 8: No commit needed for this task**
+- [ ] **Step 7: Confirm `subjects:` block is present**
 
-Smoke-test only. Any failures here mean an earlier task has a bug — go fix it.
+```bash
+grep -A 5 "^subjects:" .ao/workflows/custom.yaml
+```
+Expected: prints the `linear-discovery` subject backend block.
+
+- [ ] **Step 8: Confirm state dir is fully gitignored (no .gitkeep)**
+
+```bash
+git check-ignore .ao/state/anything
+test -f .ao/state/.gitkeep && echo "BUG: gitkeep present" || echo "OK: no gitkeep"
+```
+Expected: `.ao/state/anything` ignored; no `.gitkeep`.
+
+- [ ] **Step 9: No commit — smoke tests only**
 
 ---
 
-## Task 15: Update documentation
+## Task 14: Update documentation
 
 **Files:**
 - Modify: `MCP-TOOLS.md`
 - Modify: `README.md`
 
-- [ ] **Step 1: Add the three new MCP servers to `MCP-TOOLS.md`**
+- [ ] **Step 1: Update `MCP-TOOLS.md`**
 
-Find the "## Orchestration" section in `MCP-TOOLS.md`. Above the "## Which Agents Use What" code block, insert a new section:
+Find the "## Orchestration" section. Above the "## Which Agents Use What" code block, insert:
 
 ```markdown
 ## Discovery Loop
 
 | Server | Package | What It Does |
 |--------|---------|--------------|
-| **Krisp** | `krisp-mcp-server` | Audio transcript ingest — lists and fetches meeting transcripts since a cursor for the idea-discovery flow |
-| **Linear** | `@anthropic-ai/linear-mcp` (via [linear-pack](https://github.com/launchapp-dev/linear-pack)) | Issue create / read / status / comment — the human-review gate for blog ideas, scoped to a configured project |
-| **Content Library** | `content-library-mcp` | Org-wide content + artifact database — used by strategist for dedup and by writer/SEO for real internal-link slugs |
+| **Krisp** | (configured in workflow YAML) | Audio transcript ingest — lists and fetches meeting transcripts since a cursor |
+| **Content Library** | (configured in workflow YAML) | Org-wide content + artifact database |
 
-> **Linear setup:** install the Animus `linear-pack` connector-pack once — it bundles the MCP server config plus an `issue-management` skill our agents reference for correct tool calls:
-> ```bash
-> git clone https://github.com/launchapp-dev/linear-pack.git ~/src/linear-pack
-> animus pack install --path ~/src/linear-pack --activate
-> ```
+## Subject Backends
+
+Linear is integrated as an **Animus subject backend**, not an MCP server. The
+`animus-subject-linear` plugin auto-maps Linear's `WorkflowState.type` to
+Animus's 5 normalized statuses (`Ready / InProgress / Blocked / Done / Cancelled`),
+so the human-review gate works even if your Linear team renames states.
+
+| Backend | Plugin | What It Does |
+|---|---|---|
+| **Linear** | `launchapp-dev/animus-subject-linear` | Linear issues exposed as Animus subjects; CRUD + status + comments |
+
+Install once per host:
+```bash
+animus plugin install launchapp-dev/animus-subject-linear
+```
 ```
 
-Replace the existing "Which Agents Use What" code block with the updated allocation:
+Replace the existing "Which Agents Use What" block with:
 
 ```
-Strategist          → ao, exa, tavily, brave, firecrawl, search-console, linear, content-library
+Strategist          → ao, exa, tavily, brave, firecrawl, search-console, content-library
 Researcher          → firecrawl, exa, tavily, brave, google-maps
 Writer              → content-library
 SEO Optimizer       → search-console, firecrawl, content-library
@@ -1481,128 +1549,133 @@ Asset Generator     → replicate
 Performance Analyst → ao, search-console, exa, perplexity
 Content Refresher   → firecrawl
 Transcript Collector → krisp
-Idea Strategist     → ao, exa, tavily, brave, firecrawl, search-console, linear, content-library
-Approval Watcher    → ao, linear
-Linear Coordinator  → linear
+Idea Strategist     → ao, exa, tavily, brave, firecrawl, search-console, content-library
+Approval Watcher    → ao
+Linear Coordinator  → ao
+Register Post Runner → (none — local script only)
 ```
 
-- [ ] **Step 2: Add a Discovery Flow section to `README.md`**
+Note: Linear access is via `ao` (subject API), not a `linear` MCP server.
 
-Find an appropriate place (after the existing workflow descriptions) in `README.md` and add:
+- [ ] **Step 2: Update `README.md`**
+
+Add a "Discovery Flow" section:
 
 ```markdown
 ## Discovery Flow (transcript-driven)
 
 In addition to the cron-driven `blog-production` pipeline, this generator
-supports a transcript-driven discovery loop with a human-review gate in Linear.
+supports a transcript-driven discovery loop with a human-review gate in
+Linear (integrated as an Animus subject backend).
 
 **Daily 7am — `idea-discovery`**
-Polls Krisp for new meeting transcripts since the last cursor. For each
-transcript, the strategist proposes 3–5 blog angles, each pre-validated
-with Search Console viability + competitor scan + spot-scraped citable
-sources. Surviving angles become Linear issues in your configured
-discovery project, with the `Discovery` label, in `Backlog` state.
+Polls Krisp for new meeting transcripts. For each, the strategist proposes
+3–5 blog angles, each pre-validated with Search Console + competitor scan +
+spot-scraped citable sources. Surviving angles become Linear issues
+(Animus subjects) in your configured discovery project.
 
 **Every 15 min — `approval-watch`**
-Polls Linear (scoped to your discovery project) for issues that have moved
-out of `Backlog`. Each newly-approved issue is enqueued as a
-`blog-from-ticket` run.
+Polls Linear-backed subjects for status `InProgress` (the human-approval
+signal). Each newly-approved subject is enqueued as a `blog-from-ticket`
+run. Canceled / Won't-do issues are auto-filtered.
 
 **Per approved ticket — `blog-from-ticket`**
-A variant of blog-production that uses the Linear ticket as its topic brief.
-The first phase moves the ticket to `In Progress`; the last phase posts a
-completion comment with the branch URL and moves the ticket to `In Review`.
+A variant of blog-production using the Linear ticket as topic brief.
+- First phase posts a "started" comment.
+- `ticket-to-brief` re-fetches the latest Linear body (humans may edit
+  during review).
+- Last two phases register the post in `content/manifest.json` and post
+  a completion comment. Status transition on finalize is opt-in via
+  `LINEAR_FINALIZE_TRANSITION`.
+
+**One-time setup:**
+```bash
+animus plugin install launchapp-dev/animus-subject-linear
+```
+Then fill in `.env`:
+- `KRISP_API_KEY`
+- `LINEAR_API_TOKEN`, `LINEAR_TEAM`, `LINEAR_DISCOVERY_PROJECT_ID`
+- (Optional) `LINEAR_STATUS_MAP`, `LINEAR_FINALIZE_TRANSITION`
+- `CONTENT_LIBRARY_URL`, `CONTENT_LIBRARY_TOKEN`
 
 **State files** (gitignored):
-- `.ao/state/discovery-cursor.json` — last-processed Krisp transcript
-- `.ao/state/approval-seen.json` — already-enqueued Linear issue IDs
+- `.ao/state/discovery-cursor.json` — last *processed* Krisp transcript
+- `.ao/state/approval-seen.json` — already-enqueued subject IDs
 - `.ao/state/transcripts/<id>.json` — staged transcripts
 
-**Tracked in repo:**
-- `content/manifest.json` — canonical index of every post this generator
-  has produced. Used by the strategist for dedup and by the writer/SEO
-  for real internal-link selection.
-
-**One-time pack install** (provides the Linear MCP + a Linear skill our agents follow):
-```bash
-git clone https://github.com/launchapp-dev/linear-pack.git ~/src/linear-pack
-animus pack install --path ~/src/linear-pack --activate
-```
-
-**Configuration required** (in `.env`):
-- `KRISP_API_KEY`
-- `LINEAR_API_KEY`
-- `LINEAR_DISCOVERY_PROJECT_ID` — UUID of the Linear project for blog ideas
-- `LINEAR_STATE_BACKLOG_ID`, `LINEAR_STATE_IN_PROGRESS_ID`, `LINEAR_STATE_IN_REVIEW_ID`, `LINEAR_STATE_DONE_ID`
-- `CONTENT_LIBRARY_URL`, `CONTENT_LIBRARY_TOKEN`
+**Tracked:** `content/manifest.json` — every post this generator produced.
 ```
 
 - [ ] **Step 3: Commit**
 
 ```bash
 git add MCP-TOOLS.md README.md
-git commit -m "Document discovery flow workflows and new MCP servers"
+git commit -m "Document discovery flow + animus-subject-linear plugin setup"
 ```
 
 ---
 
 ## Configuration to confirm before first run
 
-**Linear MCP — resolved.** Task 0 installs the `linear-pack` connector-pack (`launchapp-dev/linear-pack`), which provides the canonical `linear` MCP server (`@anthropic-ai/linear-mcp@latest`) plus an `issue-management` skill our agents reference.
+Everything below has already been verified or has an explicit preflight step.
 
-**Still placeholders in `.ao/workflows/custom.yaml`:**
-- `krisp-mcp-server` → actual package name of the Krisp MCP (or use the Krisp pack if one exists on the marketplace; check with `animus pack search --query krisp`)
-- `content-library-mcp` → actual package name of the custom content-library MCP
+**Hardware-confirmed (preflight Task -1):**
+- Animus 0.5.4 installed
+- `animus-subject-linear` v0.1.4+ installed via `animus plugin install`
+- Subject API surface (MCP tools vs `animus plugin call`) — verified path applied in agent directives
+- Queue input propagation — verified shape applied in `approval-watcher`
+- Wire ID format — verified format applied in queue payload
+- Krisp + content-library MCP package names — resolved to real values
 
-**`.env` values to fill in:**
+**Still depends on user config (in `.env`):**
 - `KRISP_API_KEY`
-- `LINEAR_API_KEY`
-- `LINEAR_DISCOVERY_PROJECT_ID` — Linear project UUID for the blog discovery project
-- `LINEAR_STATE_BACKLOG_ID`, `LINEAR_STATE_IN_PROGRESS_ID`, `LINEAR_STATE_IN_REVIEW_ID`, `LINEAR_STATE_DONE_ID` — state UUIDs within the discovery project (these are project-specific; fetch via Linear's GraphQL or the Linear API once the project exists)
+- `LINEAR_API_TOKEN`
+- `LINEAR_TEAM`
+- `LINEAR_DISCOVERY_PROJECT_ID`
+- `LINEAR_STATUS_MAP` (optional override)
+- `LINEAR_FINALIZE_TRANSITION` (optional; default unset = don't auto-transition)
 - `CONTENT_LIBRARY_URL`, `CONTENT_LIBRARY_TOKEN`
 
-Until `LINEAR_DISCOVERY_PROJECT_ID` is set, `idea-strategist` skips with reason `missing_project_id` and `approval-watcher` finds nothing to enqueue — the loop is safely dormant.
-
-**Verifying the Linear MCP works (sanity check, do BEFORE Task 14):**
-
-```bash
-# With LINEAR_API_KEY set in your environment:
-animus plugin ping linear   # or whatever name the pack registered
-# Or invoke a list-issues tool directly:
-animus mcp tool-call linear issues_list --json '{"projectId":"<LINEAR_DISCOVERY_PROJECT_ID>"}'
-```
-
-If the ping or tool-call returns issues (or an empty list cleanly), the MCP wiring is correct. If it errors on auth, fix `LINEAR_API_KEY`. If the tool name differs, run `animus mcp tool-list linear` to see the real names exposed by `@anthropic-ai/linear-mcp@latest`.
+Until `LINEAR_DISCOVERY_PROJECT_ID` is set, `idea-strategist` skips with reason `missing_project_id` and `approval-watcher` finds nothing — loop is dormant.
 
 ---
 
 ## Self-Review
 
 **Spec coverage check:**
-- Animus linear-pack installed (provides real Linear MCP + skill) — Task 0 ✓
-- Three new workflows (idea-discovery, approval-watch, blog-from-ticket) — Tasks 12 ✓
-- transcript-fetch phase + transcript-collector agent — Task 3 ✓
-- idea-strategist agent + phase with external research — Task 4 ✓
-- approval-watcher agent + phase scoped to project — Task 5 ✓
-- linear-coordinator with acknowledge + finalize — Task 6 ✓
-- ticket-to-brief + extended content-strategist — Task 7 ✓
-- Extended content-writer (content-library) — Task 8 ✓
-- Extended seo-optimizer (content-library) — Task 9 ✓
-- register-post script (TDD) — Task 10 ✓
-- register-post phase — Task 11 ✓
-- Retrofit register-post into blog-production — Task 12 ✓
-- Schedules (discovery 7am, approval-watch 15 min) — Task 13 ✓
-- content/manifest.json bootstrap — Task 1 ✓
-- New MCP servers (krisp, linear, content-library) — Task 2 ✓
-- State files + gitignore — Task 1 ✓
-- Documentation updates — Task 15 ✓
-- Linear project scoping (`LINEAR_DISCOVERY_PROJECT_ID`) — embedded in Tasks 1, 4, 5, 7 ✓
+- Preflight verifying all the assumptions — Task -1 ✓
+- Project scaffolding (state dir, gitignore — no gitkeep, env vars, manifest bootstrap) — Task 0 ✓
+- MCP servers (krisp, content-library only; no linear MCP) + subject backend declaration — Task 1 ✓
+- transcript-fetch phase + cursor non-advancement — Task 2 ✓
+- idea-strategist with external research + per-transcript cursor advancement — Task 3 ✓
+- approval-watcher filtering by Animus status==InProgress, enqueueing subject_id only — Task 4 ✓
+- linear-coordinator with ack (no transition) + finalize (opt-in transition) — Task 5 ✓
+- ticket-to-brief re-fetching subject — Task 6 ✓
+- Extended content-writer (content-library) — Task 7 ✓
+- Extended seo-optimizer (content-library) — Task 8 ✓
+- register-post script (TDD) — Task 9 ✓
+- register-post phase as agent (not command, no env-magic) — Task 10 ✓
+- Workflows defined + blog-production retrofitted with register-post as LAST phase — Task 11 ✓
+- Schedules — Task 12 ✓
+- Smoke tests using verified CLI (`animus workflow prompt render`, `animus workflow get --id`, `animus plugin ping --name`) — Task 13 ✓
+- Documentation — Task 14 ✓
 
-**Placeholder scan:** None remain. Package names are flagged explicitly as needing real values, in their own "Configuration to confirm" section, not as TBDs in step bodies.
+**All 10 feedback points addressed:**
+1. linear-pack install dropped; animus-subject-linear installed in Task -1 ✓
+2. Linear ops use subject API throughout (placeholders substituted from preflight) ✓
+3. Dependency preflight is Task -1, before all YAML work ✓
+4. Cursor advanced by idea-strategist per-transcript, not by transcript-fetch ✓
+5. Approval = `status==InProgress`; Cancelled/Done/Blocked explicitly excluded ✓
+6. Queue payload is `{subject_id, subject_kind}` only; ticket-to-brief re-fetches ✓
+7. register-post is an agent phase, not command-with-env-magic ✓
+8. register-post moved AFTER push-branch (manifest = post on origin) ✓
+9. No .gitkeep; phases mkdir on demand; `.ao/state/` fully ignored ✓
+10. Smoke tests use verified CLI commands; removed fictional `animus mcp tool-call` ✓
+
+**Placeholder scan:** `<SUBJECT_*_INVOCATION>` placeholders in Tasks 3-6 are intentional — they're resolved by the preflight task and substituted in each task's "substitute the verified subject API path" step. `<KRISP_PACKAGE_NAME>` and `<CONTENT_LIBRARY_PACKAGE_NAME>` in Task 1 are flagged for preflight Step 10.
 
 **Type consistency:**
-- `linear_issue_id` is used consistently across queue payload, ticket-acknowledge, ticket-to-brief, and linear-finalize ✓
-- `slug` flows from content-writing → seo-review → register-post → linear-finalize ✓
-- `topic_brief` shape matches what existing `research-collection` already consumes ✓
-- `transcript_paths` is the output of transcript-fetch and the input of idea-strategist ✓
-- `LINEAR_STATE_*_ID` env vars are referenced consistently in Tasks 2, 4, 5, 6 ✓
+- `subject_id` flows: queue payload → ticket-acknowledge → ticket-to-brief → topic_brief.subject_id → register-post (as LINEAR_SUBJECT_ID env) → linear-finalize ✓
+- `slug` flows: content-writing → seo-review → register-post → linear-finalize ✓
+- `transcript_paths` flows: transcript-fetch → idea-strategist ✓
+- `source_transcript_id` flows: idea-strategist (writes to subject body) → ticket-to-brief (parses from body) → topic_brief → register-post (env) ✓
