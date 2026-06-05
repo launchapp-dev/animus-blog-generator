@@ -122,7 +122,7 @@ subjects:
 - `backend: linear` is the plugin-claimed kind — referenced in `animus subject` CLI calls as `--kind linear`.
 - The `${VAR:?msg}` interpolation makes the daemon refuse to start without the required vars set.
 
-**Wire IDs.** Subject CLI calls use the form `animus subject create --kind linear --title "..." --description "..."` (with backend-specific options derived from config). The plugin emits IDs like Linear's `BLG-105`. Watcher queries filter via `--kind linear --status in_progress`. **Preflight resolves the exact subject CLI / MCP-tool / plugin-call invocation path** — directives substitute the verified form before commit.
+**Wire IDs.** Subject CLI calls use the form `animus subject create --kind linear --title "..." --body "..."` (note: the CLI flag is `--body`, not `--description`; verified against `animus subject create --help`). The plugin emits IDs like Linear's `BLG-105`. Watcher queries filter via `animus subject list --kind linear --status in_progress`. **Project scoping caveat:** the generic `animus subject list` CLI exposes only `--kind / --status / --limit`. The backend's `config.project_id` may or may not be applied as a filter by the plugin internally. The watcher therefore **post-filters** every returned subject by `project_id == LINEAR_DISCOVERY_PROJECT_ID` (read from the subject's metadata) and additionally surfaces a preflight assertion test. If project filtering is not natively enforced by the plugin, the agent can fall back to `animus plugin call --name animus-subject-linear --method subject.list --params '{"project_id":"...", "status":"in_progress"}'`. **Preflight Step 4 resolves which path applies.**
 
 ## MCP servers (non-Linear)
 
@@ -287,12 +287,21 @@ Linear is a subject backend, not an MCP server. Two new MCP servers are added to
 
 ### `.ao/state/approval-seen.json`
 
+Each entry is keyed by **`(subject_id, last_approved_at)`** — *not* `subject_id` alone — so that re-approvals after a failed run (human moves the subject back to `ready` then re-transitions to `in_progress`) are recognized as new dispatch events rather than duplicates.
+
 ```json
 {
-  "subject_ids": ["BLG-101", "BLG-105"],
+  "issues": [
+    { "subject_id": "BLG-101", "last_approved_at": "2026-06-04T10:12:00Z" },
+    { "subject_id": "BLG-105", "last_approved_at": "2026-06-05T14:10:30Z" }
+  ],
   "updated_at": "2026-06-05T14:15:03Z"
 }
 ```
+
+**Dedup logic:** for each in-progress subject the watcher sees, look up its entry by `subject_id`. If no entry exists, enqueue. If an entry exists but its `last_approved_at` is **older** than the subject's current state-transition timestamp (the field the plugin exposes — preflight verifies whether this is `state_updated_at`, `updatedAt`, or similar; fall back to the subject-level `updated_at` if no transition-specific field exists), enqueue and overwrite the entry. Otherwise skip.
+
+Known limitation when falling back to subject-level `updated_at`: an edit to the subject's body or title while it remains `in_progress` would cause a duplicate enqueue. Downstream idempotency (the strategist's idempotency key, the runner's mutex on the manifest, and `ticket-acknowledge`'s status guard) makes this safe but not free. The preflight surfaces whether a transition-specific timestamp is available, and the watcher uses it when it is.
 
 ### Queue handoff payload
 
@@ -326,7 +335,7 @@ animus queue enqueue --task-id <task_id> \
 | Subject backend outage during approval-watch | No subjects enqueued | Retried next tick |
 | Queue enqueue failure | Subject stays absent from `approval-seen.json` | Retried next tick |
 | Manifest write race | — | `register-post` is `mutates_state: true`; runner mutex serializes |
-| Workflow failure mid-`blog-from-ticket` | Subject stays at `in_progress`; no terminal comment | Daemon logs surface failure; human re-runs by setting back to `ready` then approving again |
+| Workflow failure mid-`blog-from-ticket` | Subject stays at `in_progress`; no terminal comment | Daemon logs surface failure. To re-run: human moves the subject back to `ready` (any backlog-type state) and then re-approves. The watcher's `(subject_id, last_approved_at)` keyed dedup recognizes the new approval timestamp and enqueues again — keying by `subject_id` alone would have blocked this retry path. |
 | **Human cancels ticket after approval** | Subject becomes `cancelled` mid-pipeline | **`ticket-acknowledge` and `ticket-to-brief` re-check status** and emit a clean abort with reason `subject_no_longer_in_progress`. No comment is posted to the cancelled ticket. Pipeline halts; queue dispatch task is marked failed. |
 | Human edits ticket body between approval and processing | — | `ticket-to-brief` re-fetches at brief time |
 

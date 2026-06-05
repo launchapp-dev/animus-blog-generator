@@ -63,9 +63,11 @@ Expected: `.animus/workflows/custom.yaml` is now the full blog pipeline content.
 
 ```bash
 animus workflow config compile
-animus workflow list
+animus workflow definitions list
 ```
-Expected: compile succeeds; `animus workflow list` now includes `blog-production`, `refresh-cycle`, `image-refresh`, `news-monitor`.
+Expected: compile succeeds; `animus workflow definitions list` now includes `blog-production`, `refresh-cycle`, `image-refresh`, `news-monitor`.
+
+(Note: `animus workflow list` lists *runtime workflow runs*, not definitions — use `animus workflow definitions list` for the definition check.)
 
 If validation fails because the v0.4-era YAML uses constructs v0.5.4 no longer accepts: read the error, consult the `animus-workflow-authoring` skill, and patch in place. Common likely issues:
 - `tools_allowlist:` at top level (verify still supported in v0.5.4)
@@ -99,10 +101,10 @@ Replace `.ao/workflows/custom.yaml` with `.animus/workflows/custom.yaml`. Also r
 - [ ] **Step 6: Verify the workflows still resolve**
 
 ```bash
-animus workflow list
+animus workflow definitions list
 animus workflow get --id blog-production
 ```
-Expected: blog-production resolves with its full phase list intact.
+Expected: definitions list includes the migrated workflows; `blog-production` resolves with its full phase list intact.
 
 - [ ] **Step 7: Commit**
 
@@ -164,25 +166,58 @@ Expected: both accepted (no schema errors on the filter value). Verify: `ready`,
 
 The plan's approval-watcher needs to enqueue `blog-from-ticket` carrying `linear_subject_id`. The queue accepts task / requirement / ad-hoc subjects only — not Linear-backed subjects directly. Pick one shape:
 
-**Probe A (task wrapper):**
+**Important:** there is no `animus task` subcommand in v0.5.4. Tasks are subjects of kind `task` — created via `animus subject create --kind task ...`. Verified flag: `--body` (not `--description`).
+
+**Probe A (task-subject wrapper):**
 ```bash
-# Create a throwaway task and enqueue with input-json
-TASK_ID=$(animus task create --title "queue probe" --description "test" --json | jq -r '.data.id')
+# Create a throwaway task-subject and enqueue with input-json
+TASK_ID=$(animus subject create \
+  --kind task \
+  --title "queue probe" \
+  --body "queue propagation test" \
+  --status ready \
+  --json | jq -r '.data.id')
 animus queue enqueue --task-id "$TASK_ID" --workflow-ref hotfix-workflow --input-json '{"probe":"hello"}'
 ```
 Watch the dispatched workflow's phase prompts. Confirm the input-json reached the run: render the first phase prompt and look for "probe":
 ```bash
 animus workflow prompt render --workflow-id <new_id> --phase implementation
 ```
-Clean up: `animus task delete --id "$TASK_ID"` (if supported) or mark cancelled.
+Clean up: `animus subject status --kind task --id "$TASK_ID" --status cancelled`
 
-**Probe B (ad-hoc title):**
+**Probe B (ad-hoc title — no wrapper subject):**
 ```bash
-animus queue enqueue --title "queue probe" --description "test" --workflow-ref hotfix-workflow --input-json '{"probe":"hello"}'
+animus queue enqueue --title "queue probe" --description "queue propagation test" --workflow-ref hotfix-workflow --input-json '{"probe":"hello"}'
 ```
-Same prompt-render verification.
+Same prompt-render verification. Note: `animus queue enqueue` does use `--description` (CLI-verified), unlike `animus subject create` which uses `--body`. The two CLIs have different flag names — substitute correctly in each context.
 
-**Record:** which probe propagates `input_json` cleanly. The approval-watcher directive uses that shape. If neither works, fall back to encoding the `linear_subject_id` in `--description` and having `ticket-acknowledge` parse it.
+**Record:** which probe propagates `input_json` cleanly. The approval-watcher directive uses that shape. If neither works, fall back to encoding the `linear_subject_id` in the subject body / description and having `ticket-acknowledge` parse it.
+
+- [ ] **Step 6.5: Verify Linear project scoping + state-transition timestamp**
+
+The generic `animus subject list` CLI exposes `--kind / --status / --limit` but no project filter. Verify whether the plugin's backend `config.project_id` actually scopes results, and what timestamp field is available for state-transition dedup:
+
+```bash
+# List linear subjects with kind+status; inspect the JSON to confirm
+# every result belongs to LINEAR_DISCOVERY_PROJECT_ID, and capture
+# the exact timestamp field names available.
+animus subject list --kind linear --status ready --limit 50 --json | tee /tmp/linear-probe.json
+
+# Check the JSON shape:
+jq '.data[] | {id, status, project_id, updated_at, state_updated_at, stateUpdatedAt}' /tmp/linear-probe.json
+```
+
+Record:
+- **Project scoping:** are ALL returned subjects in the configured project? If yes, backend filtering is active and no post-filter needed. If results leak from other projects, the watcher MUST post-filter by `project_id`. Document the field name as it appears (`project_id`, `projectId`, etc.).
+- **Transition timestamp:** which of these fields actually appears in the JSON: `state_updated_at`, `stateUpdatedAt`, `updated_at`, `updatedAt`. The watcher's dedup keys on the most state-specific one available.
+- If no transition-specific timestamp exists, fall back to subject-level `updated_at` and accept the duplicate-on-body-edit caveat (downstream idempotency makes this safe).
+
+If the post-filter route is needed and the plugin does NOT scope by config, alternative is to use the explicit plugin-call form:
+```bash
+animus plugin call --name animus-subject-linear --method subject.list \
+  --params '{"project_id":"'"$LINEAR_DISCOVERY_PROJECT_ID"'","status":"in_progress"}'
+```
+Record whether this method shape works.
 
 - [ ] **Step 7: Verify the `subjects:` YAML schema is accepted**
 
@@ -220,6 +255,8 @@ Create a local note `~/.animus-blog-generator-preflight.md` (outside the repo to
 - Method names + param shapes from Step 3
 - Working queue dispatch probe (A or B)
 - Confirmed status casing values
+- **Project scoping behavior (Step 6.5): backend-filtered vs needs post-filter**
+- **Transition timestamp field name (Step 6.5): `state_updated_at` / `updatedAt` / fallback to `updated_at`**
 - Subject YAML schema confirmed
 - `on_failure` hook support: yes / no
 - Krisp package name
@@ -506,9 +543,9 @@ Directive uses `<SUBJECT_CREATE>` and `<SUBJECT_LIST>` placeholders — substitu
                 <SUBJECT_LIST> --kind linear (scoped to project) filtering
                 description for the idempotency key.
                 If found, skip (created in a prior run).
-           iii. Create the subject:
+           iii. Create the subject (note: CLI flag is --body, NOT --description):
                 <SUBJECT_CREATE> --kind linear --title "<headline>" \
-                  --description "<structured markdown body with sections:
+                  --body "<structured markdown body with sections:
                     ## Source / Transcript: <id> @ <ts> / Quote: '<quote>'
                     ## Suggested target keyword / '<keyword>' GSC stats
                     ## Competitive landscape / top 3 URLs + gap
@@ -600,23 +637,46 @@ The exact enqueue invocation depends on preflight Step 6 outcome (probe A = task
       Step 1 — Read seen set
       mkdir -p .ao/state
       Read .ao/state/approval-seen.json. If missing, treat as
-      {"subject_ids":[], "updated_at":null}.
+      {"issues":[], "updated_at":null}.
+      Schema reminder: each entry is
+        { "subject_id": "...", "last_approved_at": "ISO8601" }.
+      Keying by (subject_id, last_approved_at) — NOT subject_id alone —
+      so re-approvals after a failed run can be re-enqueued.
 
       Step 2 — List Linear-backed subjects with status=in_progress
-      <SUBJECT_LIST> --kind linear --status in_progress
-      (scoped to LINEAR_DISCOVERY_PROJECT_ID via backend config)
-      Return: subject_id, title, description.
+      <SUBJECT_LIST> --kind linear --status in_progress --json
+      Capture for each: subject_id, title, body, project_id, AND the
+      transition timestamp field identified in preflight Step 6.5
+      (call it <TRANSITION_TS_FIELD> — typically state_updated_at,
+      stateUpdatedAt, or fallback updated_at).
 
-      Step 3 — Diff against seen
-      Filter out any subject_id already in the seen set.
+      Step 3 — Post-filter by project (per preflight Step 6.5 outcome)
+      If preflight determined the backend does NOT scope by project_id
+      via config alone, filter the returned list:
+        keep only subjects where project_id == LINEAR_DISCOVERY_PROJECT_ID.
+      If preflight confirmed backend scoping, skip this filter.
 
-      Step 4 — Dispatch each newly-approved subject
-      For each new approval (use the form verified in preflight Step 6):
+      Step 4 — Diff against seen using (subject_id, transition_ts)
+      For each candidate subject:
+        - Look up entry in approval-seen.json where subject_id matches.
+        - If no entry exists: this is a new approval → enqueue.
+        - If entry exists and entry.last_approved_at < subject.<TRANSITION_TS_FIELD>:
+          this is a re-approval after the prior run → enqueue and overwrite.
+        - If entry exists and entry.last_approved_at >= subject.<TRANSITION_TS_FIELD>:
+          already enqueued for this approval → skip.
 
-      [Task-wrapper form]
-        TASK_ID=$(animus task create \
+      Step 5 — Dispatch each enqueue-eligible subject
+      (Use the form verified in preflight Step 6. There is NO `animus task`
+      subcommand — tasks are subjects of kind=task. CLI flag for the
+      task-subject body is --body. CLI flag for ad-hoc queue enqueue
+      is --description.)
+
+      [Task-subject wrapper form, if Probe A worked]
+        TASK_ID=$(animus subject create \
+          --kind task \
           --title "Blog: <subject title>" \
-          --description "Wraps Linear subject <subject_id> for blog-from-ticket" \
+          --body "Wraps Linear subject <subject_id> for blog-from-ticket" \
+          --status ready \
           --json | jq -r '.data.id')
         animus queue enqueue \
           --task-id "$TASK_ID" \
@@ -630,10 +690,15 @@ The exact enqueue invocation depends on preflight Step 6 outcome (probe A = task
           --workflow-ref blog-from-ticket \
           --input-json "{\"linear_subject_id\":\"<subject_id>\"}"
 
-      Step 5 — Update seen set (atomic tmpfile + rename)
-      Append every successfully-enqueued subject_id. updated_at = now.
+      Step 6 — Update seen set (atomic tmpfile + rename)
+      For every successfully-enqueued subject:
+        If subject_id was already in issues[], overwrite its
+          last_approved_at with subject.<TRANSITION_TS_FIELD>.
+        Otherwise append { subject_id, last_approved_at: subject.<TRANSITION_TS_FIELD> }.
+      Set top-level updated_at = current ISO8601.
+      Write via tmpfile + rename.
 
-      Step 6 — Verdict
+      Step 7 — Verdict
       If nothing newly approved, emit skip with reason "no_approvals".
       Else emit phase_result with enqueued list.
     capabilities:
@@ -1442,9 +1507,11 @@ After `news-monitor`:
 ```bash
 animus workflow config validate
 animus workflow config compile
-animus workflow list
+animus workflow definitions list
 ```
-Expected: 7 workflows total. `animus workflow get --id blog-from-ticket` returns the 11-phase pipeline.
+Expected: 7 workflow definitions total. `animus workflow get --id blog-from-ticket` returns the 11-phase pipeline.
+
+(`workflow definitions list` shows YAML-defined workflows; `workflow list` shows runtime *runs* — use definitions for static verification.)
 
 - [ ] **Step 4: Commit**
 
@@ -1525,12 +1592,13 @@ Expected phase order:
 11. linear-finalize
 ```
 
-- [ ] **Step 4: Get blog-production**
+- [ ] **Step 4: Definitions list + get blog-production**
 
 ```bash
+animus workflow definitions list
 animus workflow get --id blog-production
 ```
-Expected: includes `register-post` between `social-excerpts` and `push-branch`.
+Expected: definitions list shows all 7; `get --id blog-production` reveals `register-post` between `social-excerpts` and `push-branch`.
 
 - [ ] **Step 5: Ping plugin**
 
@@ -1707,6 +1775,8 @@ git commit -m "Document discovery flow + animus-subject-linear setup + daemon-en
 
 ## Reviewer findings addressed
 
+### Round 1 (P0/P1/P2)
+
 | # | Finding | Resolution |
 |---|---|---|
 | P0-1 | `.ao/workflows/custom.yaml` is dormant | Task -2 migrates everything to `.animus/workflows/custom.yaml`, deletes the stale file, updates CLAUDE.md |
@@ -1718,6 +1788,16 @@ git commit -m "Document discovery flow + animus-subject-linear setup + daemon-en
 | P1-5 | `slug` can't be found by `register-post`; script doesn't emit commit_message | seo-review's output contract is extended to thread `slug` (Task 8 Step 3); script echoes commit_message on stdout (Task 9); register-post reads slug from seo-review (Task 10) |
 | P2-1 | `.env` not auto-loaded by daemon | README + spec document the explicit `set -a; source .env; set +a` pattern (Task 14 Step 2); `subjects:` block uses `${VAR:?msg}` for fast-fail |
 | P2-2 | Cancellation after approval treated as harmless | `ticket-acknowledge` and `ticket-to-brief` re-check `status == in_progress` and emit FAIL with reason `subject_no_longer_in_progress` (Tasks 5 and 6) |
+
+### Round 2 (post-fix re-review)
+
+| # | Finding | Resolution |
+|---|---|---|
+| R2-P1-1 | Task-wrapper used removed `animus task` commands | Replaced with `animus subject create --kind task --title ... --body ...` for wrapper creation and `animus subject status --kind task --id ... --status cancelled` for cleanup (Task -1 Step 6, Task 4 directive). Preflight probe updated. |
+| R2-P1-2 | `approval-seen.json` blocked retries after failed runs | Schema changed: entries now `{ subject_id, last_approved_at }` keyed by `(subject_id, transition_timestamp)`. On re-approval (human moves subject back to `ready` then forward again), the new transition timestamp differs from the seen entry → re-enqueued. Task 4 directive updated with new dedup logic. Spec data contracts section documents the schema + limitation. |
+| R2-P1-3 | Project scoping not actually enforced by generic CLI | Added preflight Step 6.5 to verify whether the backend's `config.project_id` actually scopes generic-CLI results, and to capture which transition-timestamp field is exposed. If backend scoping is missing, watcher post-filters by `project_id == LINEAR_DISCOVERY_PROJECT_ID` (Task 4 directive Step 3). |
+| R2-P2-1 | Subject-create CLI uses `--body`, not `--description` | Replaced throughout. Note: `animus queue enqueue` does use `--description` (different CLI) — this distinction is called out explicitly in Task -1 Step 6. |
+| R2-P2-2 | Used `animus workflow list` where definitions intended | Replaced with `animus workflow definitions list` in Task -2 Step 3 + Step 6 and Task 11 Step 3 + Task 13 Step 4. `workflow list` (runtime runs) kept only where actually checking runs. |
 
 ---
 
