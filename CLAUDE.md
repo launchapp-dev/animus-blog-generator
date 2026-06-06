@@ -8,7 +8,7 @@ Keep commit messages concise and descriptive. No AI co-author attribution.
 
 This project runs on **Animus** (CLI: `animus`, formerly `ao` — both binaries exist as a backwards-compat symlink, prefer `animus`). Project state lives under `.ao/` (on-disk path was not renamed); CLI invocations use `animus`.
 
-After ANY change to `.ao/workflows/custom.yaml`, you MUST run:
+After ANY change to `.animus/workflows/custom.yaml`, you MUST run:
 
 ```bash
 animus workflow config compile

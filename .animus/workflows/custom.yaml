@@ -1,3 +1,5 @@
+default_workflow_ref: standard-workflow
+
 # ──────────────────────────────────────────────────────────────
 # blog-engine.yaml — Automated SEO blog pipeline
 # ──────────────────────────────────────────────────────────────
@@ -32,57 +34,57 @@ mcp_servers:
     - -y
     - exa-mcp-server
     env:
-      EXA_API_KEY: ${EXA_API_KEY}
+      EXA_API_KEY: ${EXA_API_KEY:-UNSET}
   tavily:
     command: npx
     args:
     - -y
     - tavily-mcp
     env:
-      TAVILY_API_KEY: ${TAVILY_API_KEY}
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-UNSET}
   brave:
     command: npx
     args:
     - -y
     - '@anthropic/brave-search-mcp'
     env:
-      BRAVE_API_KEY: ${BRAVE_API_KEY}
+      BRAVE_API_KEY: ${BRAVE_API_KEY:-UNSET}
   firecrawl:
     command: npx
     args:
     - -y
     - firecrawl-mcp-server
     env:
-      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY}
+      FIRECRAWL_API_KEY: ${FIRECRAWL_API_KEY:-UNSET}
   google-maps:
     command: npx
     args:
     - -y
     - google-maps-mcp-server
     env:
-      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY}
+      GOOGLE_MAPS_API_KEY: ${GOOGLE_MAPS_API_KEY:-UNSET}
   search-console:
     command: npx
     args:
     - -y
     - search-console-mcp
     env:
-      GSC_CLIENT_EMAIL: ${GSC_CLIENT_EMAIL}
-      GSC_PRIVATE_KEY: ${GSC_PRIVATE_KEY}
+      GSC_CLIENT_EMAIL: ${GSC_CLIENT_EMAIL:-UNSET}
+      GSC_PRIVATE_KEY: ${GSC_PRIVATE_KEY:-UNSET}
   replicate:
     command: npx
     args:
     - -y
     - replicate-mcp
     env:
-      REPLICATE_API_TOKEN: ${REPLICATE_API_TOKEN}
+      REPLICATE_API_TOKEN: ${REPLICATE_API_TOKEN:-UNSET}
   perplexity:
     command: npx
     args:
     - -y
     - '@perplexity/modelcontextprotocol'
     env:
-      PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY}
+      PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY:-UNSET}
   # ── Publishing (bring your own CMS) ──────────────────────────
   # To publish directly to your CMS, add an MCP server here.
   # Example for a custom blog MCP server:
@@ -92,8 +94,8 @@ mcp_servers:
   #     args:
   #     - ./scripts/blog-mcp-server.js
   #     env:
-  #       DATABASE_URL: ${DATABASE_URL}
-  #       STORAGE_BUCKET: ${STORAGE_BUCKET}
+  #       DATABASE_URL: ${DATABASE_URL:-UNSET}
+  #       STORAGE_BUCKET: ${STORAGE_BUCKET:-UNSET}
   #
   # Then uncomment the publish phase in the blog-production workflow below.
 
