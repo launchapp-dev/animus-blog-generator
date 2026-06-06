@@ -315,8 +315,8 @@ Create a local note `~/.animus-blog-generator-preflight.md` (outside the repo to
 - **Transition timestamp field name (Step 6.5): `state_updated_at` / `updatedAt` / fallback to `updated_at`**
 - Subject YAML schema confirmed
 - `on_failure` hook support: yes / no
-- Krisp package name
-- Content-library package name
+- Krisp MCP: existing `command` / `args` / `env` block (if pre-configured) OR `"not configured"`
+- Content-library MCP: existing `command` / `args` / `env` block (if pre-configured) OR `"not configured"` (note: Tasks 6–8 require this to be real, not stubbed — Krisp can be stubbed but content-library is production-critical)
 
 This note is referenced by every subsequent task that needs to substitute a real invocation.
 
@@ -436,7 +436,20 @@ In `.animus/workflows/custom.yaml`'s existing `mcp_servers:` block, after the `p
 
 **Do NOT add a `linear:` MCP server.** Linear access is via the subject backend.
 
-**Rationale:** the discovery and idea-strategist phases are the only consumers of `krisp` and `content-library`. With TODO stubs, those phases fail fast with a clear "MCP server `true` exited" error — but the rest of the architecture (subject backend, queue handoff, blog-from-ticket pipeline, manifest, retry semantics) lands and works on the existing `blog-production` flow, which doesn't touch these MCPs. The user can wire up Krisp / content-library at their own pace without re-running this plan.
+**Rationale and gating — the two MCPs are NOT equivalent:**
+
+- **`krisp` — stubable.** Only the `transcript-fetch` phase consumes it, and only inside the new `idea-discovery` workflow. With a TODO stub, just discovery runs fail — every other workflow (existing `blog-production`, the new `blog-from-ticket`) runs to completion. The user can wire up Krisp later without re-running this plan.
+
+- **`content-library` — production-critical.** Tasks 6, 7, and 8 add `content-library` to `content-strategist`, `content-writer`, and `seo-optimizer`. Those agents run in BOTH `blog-from-ticket` AND the existing `blog-production` workflow. If `content-library` is a `command: "true"` stub:
+  - `topic-research` (blog-production), `ticket-to-brief` (blog-from-ticket), `content-writing`, and `seo-review` will all fail at the point they try to query the MCP.
+  - This means **approved Linear tickets cannot produce blogs**, and the existing cron-driven `blog-production` schedule starts failing too.
+  - Net effect: a stub here doesn't just delay discovery — it breaks the running pipeline.
+
+  Therefore: **content-library is a hard precondition for Tasks 6, 7, and 8.** If preflight Step 9 surfaced no existing config and the user can't supply real `command` / `args` / `env`, **stop here and skip Tasks 6–8.** All other tasks (the discovery + approval + blog-from-ticket pipeline minus the content-library augmentations) still ship; `content-writer` and `seo-optimizer` keep their current manifest-only internal-link discovery (worse than content-library-augmented, but functional). Tasks 6–8 are then a follow-up effort once `content-library` is real.
+
+  If you have real config: add the real block here (replacing the stub form) and Tasks 6–8 proceed.
+
+**Document the choice taken** in the commit message for this task: either "krisp stubbed + content-library real" or "both real" or "krisp stubbed + content-library deferred (skipping Tasks 6–8)."
 
 - [ ] **Step 2: Add the `subjects:` block (verified list shape with `backend:`)**
 
@@ -938,6 +951,8 @@ git commit -m "Add linear-coordinator: ack guard against cancellation; finalize 
 
 ## Task 6: Add `ticket-to-brief` phase + extend `content-strategist` (with cancellation guard)
 
+> **Precondition: `content-library` MCP must be REAL (not the `command: "true"` stub).** This task extends `content-strategist`, which runs both `topic-research` (in `blog-production`) and `ticket-to-brief` (in `blog-from-ticket`). A stub breaks the running cron pipeline. If `content-library` is still a stub from Task 1 Step 1, **skip Task 6** and proceed to Task 9. Tasks 6–8 become a follow-up once the MCP is wired.
+
 **Files:**
 - Modify: `.animus/workflows/custom.yaml`
 
@@ -1051,6 +1066,8 @@ git commit -m "Add ticket-to-brief with re-fetch + cancellation guard; extend co
 
 ## Task 7: Extend `content-writer` (content-library MCP + slug pass-through)
 
+> **Precondition: same as Task 6 — `content-library` must be REAL.** A stub here breaks `content-writing` in BOTH `blog-production` and `blog-from-ticket`. Skip if Task 6 was skipped.
+
 **Files:**
 - Modify: `.animus/workflows/custom.yaml`
 
@@ -1095,10 +1112,14 @@ git commit -m "Extend content-writer: content-library MCP + slug emission"
 
 ## Task 8: Extend `seo-optimizer` (content-library MCP + slug pass-through in output contract)
 
+> **Precondition: same as Tasks 6–7 — `content-library` must be REAL.** A stub breaks `seo-review` in both workflows. Skip if Tasks 6–7 were skipped.
+>
+> **However: the slug pass-through change in Step 3 of this task is REQUIRED regardless of content-library status** — `register-post` depends on it (see Task 10). If you're skipping the content-library wiring, **still execute Step 3 (output_contract update + slug threading directive)**; just skip Steps 1 and 2.
+
 **Files:**
 - Modify: `.animus/workflows/custom.yaml`
 
-- [ ] **Step 1: Add `content-library` to `mcp_servers`**
+- [ ] **Step 1: Add `content-library` to `mcp_servers`** *(skip if content-library is stubbed)*
 
 ```yaml
     mcp_servers:
@@ -1107,7 +1128,7 @@ git commit -m "Extend content-writer: content-library MCP + slug emission"
     - content-library
 ```
 
-- [ ] **Step 2: Update internal-link verification line**
+- [ ] **Step 2: Update internal-link verification line** *(skip if content-library is stubbed)*
 
 Find:
 ```
@@ -1881,13 +1902,21 @@ git commit -m "Document discovery flow + animus-subject-linear setup + daemon-en
 | R3-P2 | Migration claimed "no semantic loss" but stub had `default_workflow_ref` + `tools_allowlist` | Task -2 Step 1 now lists the stub's contents explicitly and the migration decision per key: `default_workflow_ref: standard-workflow` is **preserved** (harmless; only matters for ad-hoc runs without explicit `--workflow-ref`); `tools_allowlist: [cargo]` is **dropped** as a Rust-template artifact, replaced by the blog pipeline's own `[git, gh, bash, WebSearch, WebFetch]` allowlist. |
 | R3-P3 | Migration rationale cited `animus workflow list` as evidence | Task -2 preamble rewritten to cite `animus workflow config get --json | jq -r .data.path` as the direct evidence that the active config root is `.animus/workflows/`. `workflow definitions list` is noted as a secondary indicator. `workflow list` is no longer cited anywhere as evidence. |
 
+### Round 4 (ship gate)
+
+| # | Finding | Resolution |
+|---|---|---|
+| R4-P1 | I claimed TODO MCP stubs only affect discovery; Tasks 6–8 prove that wrong — `content-library` is added to production agents and a stub breaks the running pipeline | Task 1 Step 1 rationale now distinguishes **stubable** (`krisp` — only affects `idea-discovery`) from **production-critical** (`content-library` — required by `topic-research`, `ticket-to-brief`, `content-writing`, `seo-review` across both `blog-production` and `blog-from-ticket`). Tasks 6, 7, 8 each carry an explicit `> Precondition: content-library MUST be real` callout at the top; if it isn't, those tasks are skipped and the rest of the plan still ships. Task 8 Step 3 (slug pass-through) is exempted from the skip because `register-post` depends on it regardless. |
+| R4-P2 | Stale "package name" / "registered package" language survived | Preflight outcome-recording bullet rewritten to "existing `command` / `args` / `env` OR `not configured`." Spec open-questions items 4 and 5 rewritten the same way. Plan self-review placeholder-scan rewritten — there is no `<KRISP_PACKAGE_NAME>` placeholder; MCP wiring is a two-branch decision. |
+| R4-P3 | Spec Summary still cited `animus workflow list` as evidence | Spec Summary now cites `animus workflow config get --json | jq -r .data.path` and `animus workflow definitions list`. `workflow list` is explicitly noted as "lists runtime workflow runs, not definitions — not the right evidence." Plan was already correct. |
+
 ---
 
 ## Self-Review (post-revision)
 
 **Spec coverage:** every spec section maps to a task. Path migration (Task -2), preflight (Task -1), scaffolding (Task 0), MCP + subjects (Task 1), discovery workflow (Tasks 2-3), approval workflow (Task 4), blog-from-ticket workflow (Tasks 5-6, 10), extensions (Tasks 7-8), script (Task 9), workflow definitions (Task 11), schedules (Task 12), smoke tests (Task 13), docs (Task 14).
 
-**Placeholder scan:** the only placeholders are `<SUBJECT_LIST>` / `<SUBJECT_CREATE>` / `<SUBJECT_GET>` / `<SUBJECT_UPDATE>` / `<SUBJECT_COMMENT>` (resolved by preflight Step 4) and `<KRISP_PACKAGE_NAME>` / `<CONTENT_LIBRARY_PACKAGE_NAME>` (resolved by preflight Step 9). Each is explicitly substituted in the step where it's introduced.
+**Placeholder scan:** the only placeholders are `<SUBJECT_LIST>` / `<SUBJECT_CREATE>` / `<SUBJECT_GET>` / `<SUBJECT_UPDATE>` / `<SUBJECT_COMMENT>` (resolved by preflight Step 4). MCP wiring in Task 1 is not a placeholder — it's an explicit two-branch decision: copy verified `command` / `args` / `env` from existing config (Form A) OR use a TODO stub (Form B) per preflight Step 9 outcome. Krisp can take either form; content-library requires Form A (or Tasks 6–8 are skipped).
 
 **Type consistency:**
 - `linear_subject_id` flows: input_json → ticket-acknowledge → ticket-to-brief.topic_brief → register-post (env) → linear-finalize ✓

@@ -8,7 +8,7 @@
 
 Extend the existing blog generator with an upstream **idea-discovery → human-review → approved-ticket → blog-production** pipeline. New workflows poll an audio-transcript MCP (Krisp; portable to Granola), synthesize blog ideas grounded in business context and external SEO research, file them as **Linear-backed Animus subjects** in a dedicated Linear project for human review, then detect approval and hand off to a variant of the existing blog pipeline.
 
-**Canonical workflow path (v0.5.4):** All YAML changes target **`.animus/workflows/custom.yaml`**, not `.ao/workflows/custom.yaml`. The latter is dormant — `animus workflow config get` resolves to `.animus/workflows/` and `animus workflow list` does not surface anything from `.ao/workflows/`. A migration step relocates the existing blog pipeline before any discovery-flow additions land.
+**Canonical workflow path (v0.5.4):** All YAML changes target **`.animus/workflows/custom.yaml`**, not `.ao/workflows/custom.yaml`. The latter is dormant — `animus workflow config get --json | jq -r .data.path` resolves to `.animus/workflows/`, and `animus workflow definitions list` confirms only the bundled standard/hotfix/research definitions are loaded pre-migration. (`animus workflow list` lists *runtime workflow runs*, not definitions — it's not the right evidence here.) A migration step relocates the existing blog pipeline before any discovery-flow additions land.
 
 **Linear integration:** via the `animus-subject-linear` plugin (v0.1.4+, requires Animus v0.4.0+; we are on v0.5.4). Linear is **not** treated as a generic MCP server. Linear issues are first-class Animus subjects of kind `linear`.
 
@@ -368,8 +368,8 @@ These are resolved during the dependency preflight task; none should be guessed.
 1. **Subject API surface in agent directives** — `animus subject create` CLI / `animus_subject_*` MCP tool / `animus plugin call --name animus-subject-linear ...`. Preflight runs each form and the directives substitute the working one.
 2. **Queue enqueue propagation** — does `--input-json` actually flow through to the dispatched workflow's first phase? Preflight runs a disposable probe workflow and documents the syntax for reading the input.
 3. **Subject dispatch wrapper** — does the queue accept a Linear-backed subject directly, or do we wrap in a task / ad-hoc subject? Preflight verifies which path works.
-4. **Krisp MCP package name + tool surface** — placeholder `krisp-mcp-server`; replace with real package.
-5. **Content library MCP package name + tool surface** — placeholder `content-library-mcp`; replace with real package.
+4. **Krisp MCP existing config** — this design does not install new MCP servers; preflight inventories whether Krisp is already wired up elsewhere (`.mcp.json`, the workflow YAML's `mcp_servers:`, or daemon-level config). Outcome is either "use existing `command` / `args` / `env`" or "not configured — leave as TODO stub; the discovery workflow runs no-op until wired."
+5. **Content-library MCP existing config** — same approach. Outcome is either "use existing `command` / `args` / `env`" or "not configured — **defer Tasks 6–8** until wired" (stubbing this MCP would break the production pipeline, not just discovery, because `content-strategist`, `content-writer`, and `seo-optimizer` all consume it in `blog-production` and `blog-from-ticket`).
 6. **`LINEAR_FINALIZE_TRANSITION` behavior** — default unset = no transition; `=done` = mark complete. If the team needs a granular "In Review" state, document the `animus plugin call --name animus-subject-linear` path for setting a specific Linear state by ID.
 7. **`on_failure` hook support in v0.5.4** — if supported, `linear-coordinator` registers a failure path that posts an error comment.
 
