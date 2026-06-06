@@ -5,8 +5,8 @@ Local placeholders for bugs discovered against external Animus plugins / tooling
 | File | Plugin / component | Severity | Filed upstream |
 |---|---|---|---|
 | [animus-subject-linear-missing-methods.md](#animus-subject-linear-v014--missing-subjectcreate--subjectcomment) | `animus-subject-linear` v0.1.4 | blocker for our discovery flow | [issue #2](https://github.com/launchapp-dev/animus-subject-linear/issues/2) |
-| [animus-queue-default-init-fails.md](./animus-queue-default-init-fails.md) | `animus-queue-default` v0.2.0 | non-blocking (daemon falls back) | not yet |
-| [animus-workflow-runner-default-init-fails.md](./animus-workflow-runner-default-init-fails.md) | `animus-workflow-runner-default` v0.3.0 | non-blocking (legacy fallback) | not yet |
+| [animus-queue-default-init-fails.md](./animus-queue-default-init-fails.md) | `animus-queue-default` v0.2.0 | non-blocking (daemon falls back) | [issue #2](https://github.com/launchapp-dev/animus-queue-default/issues/2) |
+| [animus-workflow-runner-default-init-fails.md](./animus-workflow-runner-default-init-fails.md) | `animus-workflow-runner-default` v0.3.0 | non-blocking (legacy fallback) | [issue #2](https://github.com/launchapp-dev/animus-workflow-runner-default/issues/2) |
 
 ## animus-subject-linear v0.1.4 — missing subject/create + subject/comment
 

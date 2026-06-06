@@ -4,7 +4,7 @@
 **Discovered:** 2026-06-05
 **Plugin:** `animus-queue-default` v0.2.0 (kind: `queue`)
 **Installed at:** `~/.animus/plugins/animus-queue-default` (1.6 MB binary)
-**Filed externally:** not yet (this is the local placeholder until reported upstream)
+**Filed externally:** https://github.com/launchapp-dev/animus-queue-default/issues/2
 
 ## Summary
 
@@ -79,4 +79,4 @@ For now, the daemon's bundled queue implementation handles our queue dispatch; n
 
 ## Tracking
 
-When this is filed upstream at `launchapp-dev/animus-queue-default`, update this file with the issue URL.
+Filed upstream: https://github.com/launchapp-dev/animus-queue-default/issues/2 (cross-references the `animus-workflow-runner-default` issue since both share the same init-failure signature).

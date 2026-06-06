@@ -4,7 +4,7 @@
 **Discovered:** 2026-06-05
 **Plugin:** `animus-workflow-runner-default` v0.3.0 (kind: `workflow_runner`)
 **Installed at:** `~/.animus/plugins/animus-workflow-runner-default` (23 MB binary)
-**Filed externally:** not yet (this is the local placeholder until reported upstream)
+**Filed externally:** https://github.com/launchapp-dev/animus-workflow-runner-default/issues/2
 
 ## Summary
 
@@ -102,4 +102,4 @@ The bundled legacy `oai-agent` workflow runner handles our workflows. No workflo
 
 ## Tracking
 
-When this is filed upstream at `launchapp-dev/animus-workflow-runner-default`, update this file with the issue URL.
+Filed upstream: https://github.com/launchapp-dev/animus-workflow-runner-default/issues/2 (cross-references the `animus-queue-default` issue since both share the same init-failure signature).
