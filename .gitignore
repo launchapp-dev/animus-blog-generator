@@ -5,6 +5,13 @@
 .ao/logs/
 .ao/sync.json
 
+# Bundled Animus workflows are scaffolded into .animus/workflows/ by
+# `animus init`; they aren't project state. The project-specific blog
+# pipeline lives in .animus/workflows/custom.yaml, which IS tracked.
+.animus/workflows/hotfix-workflow.yaml
+.animus/workflows/research-workflow.yaml
+.animus/workflows/standard-workflow.yaml
+
 # macOS
 .DS_Store
 

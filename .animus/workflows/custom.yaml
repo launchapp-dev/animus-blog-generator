@@ -33,6 +33,11 @@ mcp_servers:
     args:
     - -y
     - exa-mcp-server
+    # NOTE: env values use ${VAR:-UNSET} so the workflow compiles even when
+    # secrets aren't set in the daemon's parent shell. The literal "UNSET"
+    # value defers missing-key failures from compile time to the first API
+    # call. Set real values via `set -a; source .env; set +a` before
+    # `animus daemon start`. See README "Daemon environment" for details.
     env:
       EXA_API_KEY: ${EXA_API_KEY:-UNSET}
   tavily:
