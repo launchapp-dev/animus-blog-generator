@@ -6,7 +6,7 @@ Keep commit messages concise and descriptive. No AI co-author attribution.
 
 ## Animus Workflow
 
-This project runs on **Animus** (CLI: `animus`, formerly `ao` — both binaries exist as a backwards-compat symlink, prefer `animus`). Project state lives under `.ao/` (on-disk path was not renamed); CLI invocations use `animus`.
+This project runs on **Animus** (CLI: `animus`, formerly `ao` — both binaries exist as a backwards-compat symlink, prefer `animus`). Project state lives under `.animus/` (Animus v0.4 renamed the on-disk path from `.ao/`); the legacy `.ao/` directory is no longer scanned.
 
 After ANY change to `.animus/workflows/custom.yaml`, you MUST run:
 
@@ -25,7 +25,7 @@ When authoring or modifying workflows, agents, phases, or MCP integrations in th
 - `animus-mcp-setup` — wiring MCP servers into agents and per-agent allowlists
 - `animus-task-management` — `animus_task_*` MCP tools and task lifecycle
 - `animus-queue-management` — `animus_queue_*` MCP tools and enqueue semantics
-- `animus-skills` — how the per-project `.ao/skills/*.md` files are loaded by agents
+- `animus-skills` — how the per-project `.animus/skills/*.md` files are loaded by agents
 - `animus-troubleshooting` — daemon, runner, and workflow failure modes
 
 MCP tool names in the `ao` server use the `animus_` prefix (e.g. `animus_task_create`, `animus_queue_enqueue`) — these replace the older `ao.task.create` / `ao.queue.enqueue` shorthand still found in legacy phase directives.

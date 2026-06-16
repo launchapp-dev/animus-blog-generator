@@ -1,30 +1,13 @@
 default_workflow_ref: standard-workflow
-
-# ──────────────────────────────────────────────────────────────
-# blog-engine.yaml — Automated SEO blog pipeline
-# ──────────────────────────────────────────────────────────────
-# Generates SEO-optimized blog posts end-to-end:
-#   topic research → data collection → writing → SEO audit →
-#   image generation → social excerpts → publish
-#
-# Before running, complete setup:
-#   1. Copy .env.example to .env and fill in your API keys
-#   2. Run the setup wizard:  ao workflow run setup
-#      (or manually create business-context.yaml — see README)
-# ──────────────────────────────────────────────────────────────
-
 tools_allowlist:
 - git
 - gh
 - bash
 - WebSearch
 - WebFetch
-
-# ── MCP Server Definitions ────────────────────────────────────
-
 mcp_servers:
-  ao:
-    command: ao
+  animus:
+    command: animus
     args:
     - mcp
     - serve
@@ -33,11 +16,6 @@ mcp_servers:
     args:
     - -y
     - exa-mcp-server
-    # NOTE: env values use ${VAR:-UNSET} so the workflow compiles even when
-    # secrets aren't set in the daemon's parent shell. The literal "UNSET"
-    # value defers missing-key failures from compile time to the first API
-    # call. Set real values via `set -a; source .env; set +a` before
-    # `animus daemon start`. See README "Daemon environment" for details.
     env:
       EXA_API_KEY: ${EXA_API_KEY:-UNSET}
   tavily:
@@ -90,40 +68,23 @@ mcp_servers:
     - '@perplexity/modelcontextprotocol'
     env:
       PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY:-UNSET}
-  # ── Publishing (bring your own CMS) ──────────────────────────
-  # To publish directly to your CMS, add an MCP server here.
-  # Example for a custom blog MCP server:
-  #
-  #   blog:
-  #     command: node
-  #     args:
-  #     - ./scripts/blog-mcp-server.js
-  #     env:
-  #       DATABASE_URL: ${DATABASE_URL:-UNSET}
-  #       STORAGE_BUCKET: ${STORAGE_BUCKET:-UNSET}
-  #
-  # Then uncomment the publish phase in the blog-production workflow below.
-
-# ── Agent Profiles ────────────────────────────────────────────
-
 agents:
   content-strategist:
     model: claude-sonnet-4-6
     tool: claude
     mcp_servers:
-    - ao
+    - animus
     - exa
     - tavily
     - brave
     - firecrawl
     - search-console
     system_prompt: |
-      SKILLS: Read and follow .ao/skills/content-strategy.md
+      SKILLS: Read and follow .animus/skills/content-strategy.md
       CONTEXT: Read business-context.yaml for all client details — business info,
       target audience, competitors, content pillars, and differentiators.
 
-      Use Animus tools (ao.task.create, ao.queue.enqueue) for urgent news topics.
-
+      Use Animus tools (animus_task_create, animus_queue_enqueue) for urgent news topics.
   content-researcher:
     model: claude-sonnet-4-6
     tool: claude
@@ -133,14 +94,13 @@ agents:
     - tavily
     - brave
     - google-maps
-
   content-writer:
     model: claude-opus-4-6
     tool: claude
     mcp_servers: []
     system_prompt: |
-      SKILLS: Read and follow .ao/skills/content-production.md,
-      .ao/skills/ai-seo.md, .ao/skills/content-humanizer.md
+      SKILLS: Read and follow .animus/skills/content-production.md,
+      .animus/skills/ai-seo.md, .animus/skills/content-humanizer.md
       CONTEXT: Read business-context.yaml for client details and voice guidelines.
 
       Write in the voice defined in business-context.yaml. Use the perspective,
@@ -159,7 +119,6 @@ agents:
       Output: markdown with frontmatter (title, slug, meta_description, date,
       author, keywords, schema_type, content_pillar, target_keyword, word_count,
       featuredImage, excerpt, seoTitle, seoDescription).
-
   seo-optimizer:
     model: claude-sonnet-4-6
     tool: claude
@@ -167,8 +126,8 @@ agents:
     - search-console
     - firecrawl
     system_prompt: |
-      SKILLS: Read and follow .ao/skills/seo-audit.md,
-      .ao/skills/schema-markup.md, .ao/skills/ai-seo.md
+      SKILLS: Read and follow .animus/skills/seo-audit.md,
+      .animus/skills/schema-markup.md, .animus/skills/ai-seo.md
 
       SEO AUDIT CHECKLIST:
       - Target keyword in title, first paragraph, at least one H2, meta description
@@ -184,14 +143,13 @@ agents:
       AI CITABILITY: Content structured as extractable chunks — definitions,
       numbered steps, comparison tables, FAQs, attributed statistics.
       Named entities (people, places, organizations) not generics.
-
   asset-generator:
     model: claude-sonnet-4-6
     tool: claude
     mcp_servers:
     - replicate
     system_prompt: |
-      SKILLS: Read and follow .ao/skills/social-content.md
+      SKILLS: Read and follow .animus/skills/social-content.md
       CONTEXT: Read business-context.yaml for brand voice and social media guidelines.
 
       SOCIAL CONTENT RULES:
@@ -199,27 +157,25 @@ agents:
       - Facebook: conversational, end with question to drive comments
       - LinkedIn: professional, data-forward, insight-led
       - Adapt per platform — never copy-paste across channels
-
   performance-analyst:
     model: claude-sonnet-4-6
     tool: claude
     mcp_servers:
-    - ao
+    - animus
     - search-console
     - exa
     - perplexity
     system_prompt: |
-      SKILLS: Read and follow .ao/skills/ai-seo.md
+      SKILLS: Read and follow .animus/skills/ai-seo.md
       CONTEXT: Read business-context.yaml for business details and content pillars.
-
   content-refresher:
     model: claude-opus-4-6
     tool: claude
     mcp_servers:
     - firecrawl
     system_prompt: |
-      SKILLS: Read and follow .ao/skills/content-production.md,
-      .ao/skills/ai-seo.md, .ao/skills/content-humanizer.md
+      SKILLS: Read and follow .animus/skills/content-production.md,
+      .animus/skills/ai-seo.md, .animus/skills/content-humanizer.md
       CONTEXT: Read business-context.yaml for client details and voice guidelines.
 
       Same voice and content rules as the content-writer.
@@ -227,11 +183,7 @@ agents:
       Maintain the original unique angle while incorporating competitor improvements.
       Structure for AI citability — extractable chunks, attributed statistics, Q&A.
       No AI cliche words. Vary sentence length. Include opinions.
-
-# ── Phase Definitions ─────────────────────────────────────────
-
 phases:
-  # --- Blog Production phases ---
   topic-research:
     mode: agent
     agent: content-strategist
@@ -270,7 +222,6 @@ phases:
         content_pillar:
           type: string
           description: Which pillar this topic belongs to
-
   research-collection:
     mode: agent
     agent: content-researcher
@@ -296,7 +247,6 @@ phases:
         source_count:
           type: integer
           description: Number of sources consulted
-
   content-writing:
     mode: agent
     agent: content-writer
@@ -328,7 +278,6 @@ phases:
         target_keyword:
           type: string
           description: The primary SEO target keyword
-
   commit-draft:
     mode: command
     directive: Commit the blog post draft (exit 1 OK if already committed)
@@ -336,10 +285,9 @@ phases:
       program: bash
       args:
       - -c
-      - "git add content/ assets/ && git diff --cached --quiet && echo 'nothing to commit' || git commit -m 'Add blog post draft'"
+      - git add content/ assets/ && git diff --cached --quiet && echo 'nothing to commit' || git commit -m 'Add blog post draft'
       cwd_mode: task_root
       timeout_secs: 30
-
   seo-review:
     mode: agent
     agent: seo-optimizer
@@ -377,7 +325,6 @@ phases:
           description: List of fixes applied
           items:
             type: string
-
   asset-generation:
     mode: agent
     agent: asset-generator
@@ -402,7 +349,6 @@ phases:
       kind: implementation_result
       required_fields:
       - commit_message
-
   social-excerpts:
     mode: agent
     agent: asset-generator
@@ -419,7 +365,6 @@ phases:
       kind: implementation_result
       required_fields:
       - commit_message
-
   push-branch:
     mode: command
     directive: Push the branch to origin
@@ -432,31 +377,6 @@ phases:
       - HEAD
       cwd_mode: task_root
       timeout_secs: 60
-
-  # --- Publish phase (bring your own CMS) ---
-  # Uncomment and configure once you've added a blog MCP server above.
-  #
-  # publish:
-  #   mode: agent
-  #   agent: asset-generator
-  #   directive: |
-  #     Publish the blog post to the CMS using the blog MCP server.
-  #
-  #     The blog MCP server exposes tools for publishing. Call:
-  #       mcp__blog__blog({ command: "help" })
-  #     to discover available commands and their parameters.
-  #
-  #     Then:
-  #     1. Publish the post from content/<slug>.md using the publish command.
-  #        Pass the full markdown content (including frontmatter).
-  #     2. Upload the featured image from assets/<slug>.webp using the
-  #        upload_image command if the image exists.
-  #
-  #     Commit all changes and push the branch to origin.
-  #   capabilities:
-  #     mutates_state: true
-
-  # --- Refresh Cycle phases ---
   performance-analysis:
     mode: agent
     agent: performance-analyst
@@ -471,7 +391,7 @@ phases:
       If a post needs refresh, output the post path and refresh plan.
 
       Also: if keyword gaps are found (topics with zero coverage),
-      create tasks via ao.task.create for future blog-production runs.
+      create tasks via animus_task_create for future blog-production runs.
     capabilities:
       mutates_state: true
     output_contract:
@@ -489,7 +409,6 @@ phases:
       min_confidence: 0.5
       max_risk: low
       allow_missing_decision: false
-
   content-refresh-write:
     mode: agent
     agent: content-refresher
@@ -511,7 +430,6 @@ phases:
           description: Which sections were refreshed
           items:
             type: string
-
   refresh-seo-review:
     mode: agent
     agent: seo-optimizer
@@ -528,8 +446,6 @@ phases:
       kind: implementation_result
       required_fields:
       - commit_message
-
-  # --- Image Refresh phases ---
   image-regen:
     mode: agent
     agent: asset-generator
@@ -553,7 +469,6 @@ phases:
       kind: implementation_result
       required_fields:
       - commit_message
-
   image-push:
     mode: command
     directive: Push the branch with updated image
@@ -566,8 +481,6 @@ phases:
       - HEAD
       cwd_mode: task_root
       timeout_secs: 60
-
-  # --- Market/Industry News phase ---
   news-scan:
     mode: agent
     agent: content-strategist
@@ -579,8 +492,8 @@ phases:
       new developments, and other material events.
 
       If a material event is detected:
-      1. Create a task via ao.task.create with type=feature, priority=high
-      2. Enqueue it via ao.queue.enqueue with workflow_ref="blog-production"
+      1. Create a task via animus_task_create with type=feature, priority=high
+      2. Enqueue it via animus_queue_enqueue with workflow_ref="blog-production"
 
       If nothing material, emit a skip verdict. Do NOT create tasks
       for routine activity.
@@ -590,9 +503,6 @@ phases:
       min_confidence: 0.5
       max_risk: low
       allow_missing_decision: false
-
-# ── Workflow Definitions ──────────────────────────────────────
-
 workflows:
 - id: blog-production
   name: Blog Post Production
@@ -606,8 +516,6 @@ workflows:
   - asset-generation
   - social-excerpts
   - push-branch
-  # - publish  # Uncomment after configuring a blog MCP server
-
 - id: refresh-cycle
   name: Refresh Cycle
   description: Analyze performance, refresh declining post, re-optimize
@@ -616,43 +524,35 @@ workflows:
   - content-refresh-write
   - refresh-seo-review
   - push-branch
-  # - publish  # Uncomment after configuring a blog MCP server
-
 - id: image-refresh
   name: Image Refresh
   description: Regenerate featured image for an existing blog post
   phases:
   - image-regen
   - image-push
-
 - id: news-monitor
   name: Industry News Monitor
   description: Daily scan for breaking news, enqueues blog-production if material
   phases:
   - news-scan
-
-# ── Schedules ─────────────────────────────────────────────────
-# Adjust cron expressions and preferred pillars to match your
-# publishing cadence. Pillar names must match business-context.yaml.
-
 schedules:
 - id: blog-primary
-  cron: "0 8 * * 2"
+  cron: 0 8 * * 2
   workflow_ref: blog-production
   enabled: true
   input:
-    preferred_pillar: ""  # Set to a pillar name from business-context.yaml
+    preferred_pillar: ''
 - id: blog-secondary
-  cron: "0 8 * * 4"
+  cron: 0 8 * * 4
   workflow_ref: blog-production
   enabled: true
   input:
-    preferred_pillar: ""  # Set to a different pillar name
+    preferred_pillar: ''
 - id: refresh
-  cron: "0 8 * * 3"
+  cron: 0 8 * * 3
   workflow_ref: refresh-cycle
   enabled: true
 - id: news
-  cron: "0 6 * * *"
+  cron: 0 6 * * *
   workflow_ref: news-monitor
   enabled: true

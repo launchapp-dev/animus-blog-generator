@@ -26,23 +26,23 @@ agents:
     model: claude-sonnet-4-6
     mcp_servers: [exa, tavily, brave, firecrawl, search-console]
     system_prompt: |
-      SKILLS: Read and follow .ao/skills/content-strategy.md
+      SKILLS: Read and follow .animus/skills/content-strategy.md
       CONTEXT: Read business-context.yaml for all client details.
 
   content-writer:
     model: claude-opus-4-6
     mcp_servers: []
     system_prompt: |
-      SKILLS: Read and follow .ao/skills/content-production.md,
-      .ao/skills/ai-seo.md, .ao/skills/content-humanizer.md
+      SKILLS: Read and follow .animus/skills/content-production.md,
+      .animus/skills/ai-seo.md, .animus/skills/content-humanizer.md
       CONTEXT: Read business-context.yaml for voice guidelines.
 
   seo-optimizer:
     model: claude-sonnet-4-6
     mcp_servers: [search-console, firecrawl]
     system_prompt: |
-      SKILLS: Read and follow .ao/skills/seo-audit.md,
-      .ao/skills/schema-markup.md, .ao/skills/ai-seo.md
+      SKILLS: Read and follow .animus/skills/seo-audit.md,
+      .animus/skills/schema-markup.md, .animus/skills/ai-seo.md
 
   # ... content-researcher, asset-generator, performance-analyst, content-refresher
 
@@ -100,7 +100,7 @@ schedules:
   - { id: news,     cron: "0 6 * * *", workflow_ref: news-monitor }
 ```
 
-See the full workflow definition in [`.ao/workflows/custom.yaml`](.ao/workflows/custom.yaml).
+See the full workflow definition in [`.animus/workflows/custom.yaml`](.animus/workflows/custom.yaml).
 
 </details>
 
@@ -149,7 +149,7 @@ Each agent is a Claude instance with a focused role:
 | performance-analyst | Sonnet 4.6 | Content performance analysis | Search Console, Exa, Perplexity |
 | content-refresher | Opus 4.6 | Updating existing content | Firecrawl |
 
-All agents read `business-context.yaml` for your business details, brand voice, and content strategy. The content-writing agents also follow skill files in `.ao/skills/` that encode best practices for content production, SEO, humanization, and social media.
+All agents read `business-context.yaml` for your business details, brand voice, and content strategy. The content-writing agents also follow skill files in `.animus/skills/` that encode best practices for content production, SEO, humanization, and social media.
 
 ## Prerequisites
 
@@ -194,7 +194,7 @@ This kicks off the full pipeline. The first run typically takes 15-30 minutes as
 
 ### 5. Set up scheduled runs (optional)
 
-The pipeline includes default schedules in `.ao/workflows/custom.yaml`:
+The pipeline includes default schedules in `.animus/workflows/custom.yaml`:
 
 - **Tuesday 8am** — Blog production
 - **Wednesday 8am** — Refresh cycle
@@ -312,7 +312,7 @@ Run the setup wizard (`ao workflow run setup`) to generate this interactively, o
 The pipeline generates content as local markdown files and pushes to git. To publish directly to your CMS:
 
 1. Create an MCP server that exposes publishing tools (see [Animus MCP docs](https://github.com/launchapp-dev/ao-cli))
-2. Add it to the `mcp_servers` section in `.ao/workflows/custom.yaml`
+2. Add it to the `mcp_servers` section in `.animus/workflows/custom.yaml`
 3. Uncomment the `publish` phase in the workflow definitions
 4. Add the MCP server to the `asset-generator` agent's `mcp_servers` list
 
@@ -320,10 +320,8 @@ The pipeline generates content as local markdown files and pushes to git. To pub
 
 ```
 animus-blog-generator/
-├── .ao/
-│   ├── config.json                    # Animus project config
-│   ├── config/skill_definitions/      # Skill metadata (YAML)
-│   ├── skills/                        # Agent skill files (markdown)
+├── .animus/
+│   ├── skills/                        # Agent skill files (markdown — source of truth)
 │   │   ├── setup-wizard.md            # Interactive business setup
 │   │   ├── content-strategy.md        # Topic planning best practices
 │   │   ├── content-production.md      # Writing pipeline guide
@@ -364,7 +362,7 @@ Skills are markdown files that encode domain expertise. Agents reference them in
 
 ### Adjust the pipeline
 
-Edit `.ao/workflows/custom.yaml` to:
+Edit `.animus/workflows/custom.yaml` to:
 
 - **Change agent models** — Swap `claude-opus-4-6` for `claude-sonnet-4-6` to reduce cost, or vice versa for higher quality
 - **Add/remove MCP servers** — Enable only the search APIs you have keys for
@@ -380,7 +378,7 @@ ao workflow config compile
 
 ### Customize agent behavior
 
-Edit the skill files in `.ao/skills/` to change how agents approach their work. These are markdown files with best practices — agents read and follow them.
+Edit the skill files in `.animus/skills/` to change how agents approach their work. These are markdown files with best practices — agents read and follow them.
 
 ### Override voice and content rules
 

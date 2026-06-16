@@ -1,9 +1,16 @@
 # Secrets
 .env
 
-# AO runtime
-.ao/logs/
-.ao/sync.json
+# Animus runtime state (.ao/ was renamed to .animus/ in Animus v0.4)
+.animus/logs/
+.animus/sync.json
+.animus/queue.lock
+.animus/config.json
+.animus/subjects/
+.animus/requirements/
+.animus/skills/.migrated-from-ao
+.animus/workflows/*.bak
+.animus/state/
 
 # Bundled Animus workflows are scaffolded into .animus/workflows/ by
 # `animus init`; they aren't project state. The project-specific blog
