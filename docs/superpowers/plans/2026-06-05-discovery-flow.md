@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add an upstream `idea-discovery → human-review-in-Linear → approval-watch → blog-from-ticket` pipeline targeting **`.animus/workflows/custom.yaml`** (the canonical v0.5.4 workflow path), with Linear integrated as an **Animus subject backend** and `content/manifest.json` as the local post index.
+**Goal:** Add an upstream `idea-discovery → human-review-in-Linear → approval-watch → blog-from-ticket` pipeline targeting **`.animus/workflows/custom.yaml`** (the canonical v0.5.14 workflow path), with Linear integrated as an **Animus subject backend** and `content/manifest.json` as the local post index.
 
 **Architecture (revised after reviewer P0/P1 findings):** Two preflight tasks (`Task -2` migrates the existing blog pipeline from `.ao/workflows/custom.yaml` to `.animus/workflows/custom.yaml`; `Task -1` verifies plugin, subject, queue, and CLI shapes) precede all YAML changes. All status filter values use Animus's **lowercase snake_case** API form (`ready`, `in_progress`, `done`, `cancelled`, `blocked`). The subject backend is declared as a **YAML list** (`subjects: - id: ... backend: ... config: ...`), not a mapping. Queue handoff uses `--task-id` + `--input-json`, not arbitrary `input:` fields. `register-post` runs **before** `push-branch` so the single push covers the manifest commit; the script emits `commit_message` to stdout to satisfy its phase contract. `ticket-acknowledge` and `ticket-to-brief` re-check subject status to abort cleanly if the human cancelled after approval.
 
-**Tech Stack:** Animus v0.5.4, `animus-subject-linear` v0.1.4+, YAML for declarative pipeline, Bash + `jq` + `yq` for `register-post`, `bats-core` for shell tests.
+**Tech Stack:** Animus v0.5.14, `animus-subject-linear` v0.1.4+, YAML for declarative pipeline, Bash + `jq` + `yq` for `register-post`, `bats-core` for shell tests.
 
 ---
 
@@ -18,27 +18,30 @@
 - `content/manifest.json` — canonical index of generated posts (committed; bootstraps to `{"version": 1, "posts": []}`)
 
 **Modified:**
-- `.animus/workflows/custom.yaml` — **CANONICAL** v0.5.4 workflow file. Receives both the migrated blog pipeline (Task -2) and the discovery additions (Tasks 1–12).
+- `.animus/workflows/custom.yaml` — **CANONICAL** v0.5.14 workflow file. Receives both the migrated blog pipeline (Task -2) and the discovery additions (Tasks 1–12).
 - `.env.example` — env vars for Krisp, Linear subject backend, content-library
-- `.gitignore` — add `.ao/state/`
+- `.gitignore` — add `.animus/state/`
 - `CLAUDE.md` — update the `animus workflow config compile` instruction to point at `.animus/workflows/custom.yaml`
 - `MCP-TOOLS.md` — document the two new MCP servers + the Linear subject backend
 - `README.md` — document the new workflows and the daemon-env loading discipline
 
-**Deleted:**
-- `.ao/workflows/custom.yaml` — dormant in v0.5.4 after migration completes
+**Deleted (✅ done — the entire `.ao/` tree has been migrated to `.animus/` and removed):**
+- `.ao/workflows/custom.yaml` — migrated to `.animus/workflows/custom.yaml`
 - `.ao/workflows/standard-workflow.yaml` — superseded by Animus's bundled standard-workflow
+- `.ao/skills/*.md` + `.ao/config/skill_definitions/*.yaml` — migrated to `.animus/skills/` via `animus skill migrate-from-ao`; the terse YAML definitions were then dropped in favour of the robust `.animus/skills/*.md` files (the markdown is the single source of truth, read directly by the workflow agents)
 
 **Runtime-created (not in repo):**
-- `.ao/state/discovery-cursor.json`
-- `.ao/state/approval-seen.json`
-- `.ao/state/transcripts/<id>.json`
+- `.animus/state/discovery-cursor.json`
+- `.animus/state/approval-seen.json`
+- `.animus/state/transcripts/<id>.json`
 
 ---
 
 ## Task -2: Migrate the blog pipeline to `.animus/workflows/custom.yaml`
 
-The active config path resolved by `animus workflow config get` is `.animus/workflows/` (verifiable via `animus workflow config get --json | jq -r .data.path`). The existing blog pipeline lives at `.ao/workflows/custom.yaml`, a legacy v0.4.x path that the v0.5.4 daemon does not load. Migration is a precondition.
+> ✅ **COMPLETED.** The workflow migration landed in commit `1e2b8b4`, and the project skills + config were subsequently migrated and the legacy `.ao/` tree removed entirely. The blog pipeline now lives at `.animus/workflows/custom.yaml`; project skills live at `.animus/skills/*.md`. The steps below are retained as the historical record of how the migration was performed — a fresh executor should treat this task as done and skip to Task -1.
+
+The active config path resolved by `animus workflow config get` is `.animus/workflows/` (verifiable via `animus workflow config get --json | jq -r .data.path`). The existing blog pipeline previously lived at `.ao/workflows/custom.yaml`, a legacy v0.4.x path that the v0.5.x daemon does not load. Migration was a precondition.
 
 (`animus workflow definitions list` would also surface the gap — it shows only the bundled standard/hotfix/research workflows pre-migration, none of the project's blog workflows. The `config get` path resolution is the more direct evidence.)
 
@@ -100,8 +103,8 @@ Expected: compile succeeds; `animus workflow definitions list` now includes `blo
 
 (Note: `animus workflow list` lists *runtime workflow runs*, not definitions — use `animus workflow definitions list` for the definition check.)
 
-If validation fails because the v0.4-era YAML uses constructs v0.5.4 no longer accepts: read the error, consult the `animus-workflow-authoring` skill, and patch in place. Common likely issues:
-- `tools_allowlist:` at top level (verify still supported in v0.5.4)
+If validation fails because the v0.4-era YAML uses constructs v0.5.14 no longer accepts: read the error, consult the `animus-workflow-authoring` skill, and patch in place. Common likely issues:
+- `tools_allowlist:` at top level (verify still supported in v0.5.14)
 - `mcp_servers:` shape (verify still mapping vs list)
 - `decision_contract:` field shape
 
@@ -114,7 +117,7 @@ git rm .ao/workflows/custom.yaml .ao/workflows/standard-workflow.yaml
 rmdir .ao/workflows 2>/dev/null || true
 ```
 
-`.ao/skills/`, `.ao/config/`, and `.ao/state/` (runtime) are NOT deleted — they remain the project-local skill / config / state surface.
+Project skills now live at `.animus/skills/*.md` (migrated out of `.ao/`; the markdown files are the source of truth — the terse `skill_definitions` YAML layer was dropped). `.animus/state/` (runtime, gitignored) is the project-local state surface. The legacy `.ao/` tree no longer exists.
 
 - [ ] **Step 5: Update `CLAUDE.md`**
 
@@ -158,14 +161,17 @@ Establishes ground truth for plugin, subject API, queue contract, CLI commands. 
 ```bash
 animus --version
 ```
-Expected: `animus 0.5.4` or higher.
+Expected: `animus 0.5.14` or higher.
 
-- [ ] **Step 2: Install `animus-subject-linear`**
+- [ ] **Step 2: Install `animus-subject-linear` (v0.1.5+ required)**
 
 ```bash
-animus plugin install launchapp-dev/animus-subject-linear
+animus plugin install launchapp-dev/animus-subject-linear --force
+animus plugin info --name animus-subject-linear --json | jq -r '.data.manifest.version'
 ```
-Expected: success; binary lands in `~/.animus/plugins/`.
+Expected: success; binary lands in `~/.animus/plugins/`. **Version must be `0.1.5` or higher.** v0.1.4 silently overwrites the Linear issue description on every comment via `patch.comment` — the `linear-coordinator` agent (Task 5) would destroy the issue body on every `ticket-acknowledge` and `linear-finalize` run. v0.1.5 routes comments through Linear's `commentCreate` mutation correctly.
+
+**Release availability check:** if `animus plugin install` still returns `0.1.4`, the `v0.1.5` GitHub release hasn't been cut yet. Block Task 5 until it ships — see `docs/known-issues/animus-subject-linear-required-fixes.md` Prerequisite 0.
 
 - [ ] **Step 3: Verify discovery and ping**
 
@@ -176,20 +182,55 @@ LINEAR_API_TOKEN="$LINEAR_API_TOKEN" animus plugin ping --name animus-subject-li
 ```
 Expected: list includes the plugin with `plugin_kind = "subject_backend"`; info prints exposed JSON-RPC methods; ping handshake completes. Note the exact method names from `plugin info`.
 
+- [ ] **Step 3.5: Resolve duplicate subject-kind claims (REQUIRED before any `animus subject` CLI call)**
+
+`animus subject list --kind <any> --limit 1` will fail with `error: duplicate subject kind '<K>' claimed by '<plugin-A>' and '<plugin-B>'` if two installed `subject_backend` plugins both advertise the same kind. The router has no tiebreaker; every subject CLI call is dead until one is uninstalled. Verify the current state and dedupe:
+
+```bash
+# List all installed subject backends and their declared kinds.
+animus plugin list 2>&1 | grep subject_backend
+for p in $(animus plugin list 2>&1 | awk '/subject_backend/ {print $1}'); do
+  echo "$p:"
+  animus plugin info --name "$p" --json | jq -r '.data.initialize.capabilities.subject_kinds // []'
+done
+
+# Try a no-op subject call; if it errors with "duplicate subject kind", record the conflicting pair.
+animus subject list --kind issue --limit 1 2>&1 | head -1
+```
+
+If a duplicate is reported, uninstall the plugin you don't need for this project:
+
+```bash
+# Common pair on a fresh `install-defaults --include-subjects` install:
+#   animus-subject-default + animus-subject-sqlite both claim 'task'.
+# Keep whichever the project actually uses (markdown-backed vs sqlite-backed
+# task storage). Uninstall the other.
+animus plugin uninstall <unused-backend>
+```
+
+Re-run `animus subject list --kind issue --limit 1`. Expected: returns a list (possibly empty) without the duplicate-kind error. **Block all subsequent preflight steps until this is green** — no `animus subject` call works otherwise.
+
 - [ ] **Step 4: Confirm the subject CLI surface works**
 
 ```bash
-animus subject list --kind linear --status ready --limit 5
+animus subject list --kind issue --status ready --limit 5
 ```
-Expected: returns a list (possibly empty) without auth errors. If the CLI doesn't expose `--kind linear` directly, fall back to `animus plugin call --name animus-subject-linear --method subject.list --params '{...}'` and record the exact method/param names.
+Expected: returns a list (possibly empty) without auth errors. If the CLI doesn't expose `--kind issue` directly, fall back to `animus plugin call --name animus-subject-linear --method subject/list --params '{...}'` and record the exact method/param names.
 
 **Record:** the working invocation form (CLI `animus subject` vs `animus plugin call`) — every directive in Tasks 3–6 substitutes it as `<SUBJECT_LIST>` / `<SUBJECT_CREATE>` / `<SUBJECT_GET>` / `<SUBJECT_UPDATE>` / `<SUBJECT_COMMENT>`.
+
+**Substitution forms** (with `animus-subject-linear` v0.1.5+ installed):
+- `<SUBJECT_LIST>` → `animus subject list --kind issue` (or `animus plugin call --name animus-subject-linear --method subject/list --params '{...}'`)
+- `<SUBJECT_GET>` → `animus subject get --kind issue`
+- `<SUBJECT_UPDATE>` → `animus subject update --kind issue`
+- `<SUBJECT_CREATE>` → **NOT YET AVAILABLE.** The Linear plugin v0.1.5 does not declare `subject/create` because the `SubjectBackend` protocol trait has no `create` verb. The upstream protocol change + Linear plugin v0.2.0 are being worked on separately. **Task 3 (idea-strategist) is gated on this.** Until both ship, the strategist cannot create Linear issues via the subject CLI. See `docs/known-issues/animus-subject-linear-required-fixes.md`.
+- `<SUBJECT_COMMENT>` → `animus plugin call --name animus-subject-linear --method subject/update --params '{"id":"<id>","patch":{"comment":"<body>"}}'`. The CLI's `animus subject update` does NOT expose `--comment` (verified) — the plugin-call form is the only way to post a comment today. v0.1.5 routes `patch.comment` through Linear's `commentCreate` mutation; the description is not touched.
 
 - [ ] **Step 5: Confirm status casing**
 
 ```bash
-animus subject list --kind linear --status in_progress --limit 5
-animus subject list --kind linear --status cancelled --limit 5
+animus subject list --kind issue --status in_progress --limit 5
+animus subject list --kind issue --status cancelled --limit 5
 ```
 Expected: both accepted (no schema errors on the filter value). Verify: `ready`, `in_progress`, `blocked`, `done`, `cancelled` all parse. **All directives in this plan use these lowercase values.**
 
@@ -197,7 +238,7 @@ Expected: both accepted (no schema errors on the filter value). Verify: `ready`,
 
 The plan's approval-watcher needs to enqueue `blog-from-ticket` carrying `linear_subject_id`. The queue accepts task / requirement / ad-hoc subjects only — not Linear-backed subjects directly. Pick one shape:
 
-**Important:** there is no `animus task` subcommand in v0.5.4. Tasks are subjects of kind `task` — created via `animus subject create --kind task ...`. Verified flag: `--body` (not `--description`).
+**Important:** there is no `animus task` subcommand in v0.5.14. Tasks are subjects of kind `task` — created via `animus subject create --kind task ...`. Verified flag: `--body` (not `--description`).
 
 **Probe A (task-subject wrapper):**
 ```bash
@@ -232,7 +273,7 @@ The generic `animus subject list` CLI exposes `--kind / --status / --limit` but 
 # List linear subjects with kind+status; inspect the JSON to confirm
 # every result belongs to LINEAR_DISCOVERY_PROJECT_ID, and capture
 # the exact timestamp field names available.
-animus subject list --kind linear --status ready --limit 50 --json | tee /tmp/linear-probe.json
+animus subject list --kind issue --status ready --limit 50 --json | tee /tmp/linear-probe.json
 
 # Check the JSON shape:
 jq '.data[] | {id, status, project_id, updated_at, state_updated_at, stateUpdatedAt}' /tmp/linear-probe.json
@@ -334,15 +375,13 @@ This note is referenced by every subsequent task that needs to substitute a real
 - Modify: `.env.example`
 - Create: `content/manifest.json`
 
-- [ ] **Step 1: Add `.ao/state/` to `.gitignore`**
+- [ ] **Step 1: Add `.animus/state/` to `.gitignore`**
 
-Edit `.gitignore`:
+The Animus runtime-state ignores (`.animus/logs/`, `.animus/sync.json`, `.animus/queue.lock`, `.animus/subjects/`, etc.) are already present from the `.ao/` → `.animus/` migration. This step only adds the discovery-flow state dir:
 
 ```
-# AO runtime
-.ao/logs/
-.ao/state/
-.ao/sync.json
+# Animus runtime state
+.animus/state/
 ```
 
 **No `.gitkeep`.** Phases mkdir on demand.
@@ -513,21 +552,21 @@ git commit -m "Add krisp + content-library MCP servers and linear-discovery subj
     mode: agent
     agent: transcript-collector
     directive: |
-      Read .ao/state/discovery-cursor.json. Use cursor.last_processed_at as
+      Read .animus/state/discovery-cursor.json. Use cursor.last_processed_at as
       the timestamp cutoff. If the cursor file is missing, treat as null and
       cap fetch at 20.
 
-      mkdir -p .ao/state/transcripts
+      mkdir -p .animus/state/transcripts
 
       List Krisp transcripts created strictly after the cutoff. For each (in
       chronological order):
         - Fetch full text + metadata (id, created_at, participants,
           duration_secs, title)
-        - Write to .ao/state/transcripts/<id>.json with:
+        - Write to .animus/state/transcripts/<id>.json with:
           { "id":"...", "created_at":"<ISO8601>", "participants":[...],
             "duration_secs":N, "title":"...", "text":"..." }
 
-      DO NOT touch .ao/state/discovery-cursor.json. idea-strategist owns it.
+      DO NOT touch .animus/state/discovery-cursor.json. idea-strategist owns it.
 
       If no new transcripts, emit skip with reason "no_new_transcripts".
     capabilities:
@@ -562,10 +601,16 @@ git commit -m "Add transcript-collector agent and transcript-fetch phase (cursor
 
 ## Task 3: Add `idea-strategist` agent + phase
 
+> ⚠️ **GATED on `animus-subject-linear` v0.2.0 + upstream protocol change.** The Linear plugin v0.1.5 does NOT declare a `subject/create` capability — the `SubjectBackend` protocol trait has no `create` verb yet. `<SUBJECT_CREATE>` cannot be substituted with a working invocation today. The upstream protocol expansion and plugin work are tracked in `docs/known-issues/animus-subject-linear-required-fixes.md`. Until both ship, this task is blocked.
+>
+> **What can land before that:** the agent + phase YAML can be authored against the eventual contract (using `<SUBJECT_CREATE>` as a literal placeholder), as long as the workflow is not added to the workflow-definitions list (Task 11) yet — otherwise the YAML validation will fail or the scheduled run will dispatch a broken phase.
+>
+> **Workaround during the gap:** Tasks 0–2 (state dir, manifest, MCP wiring, transcript-fetch) can still ship and idea-discovery's schedule (Task 12) can stay disabled. Once v0.2.0 lands, swap the placeholder, validate, and enable the schedule.
+
 **Files:**
 - Modify: `.animus/workflows/custom.yaml`
 
-Directive uses `<SUBJECT_CREATE>` and `<SUBJECT_LIST>` placeholders — substitute from preflight Step 4.
+Directive uses `<SUBJECT_CREATE>` and `<SUBJECT_LIST>` placeholders — substitute from preflight Step 4 once `subject/create` is available.
 
 - [ ] **Step 1: Add agent**
 
@@ -574,7 +619,7 @@ Directive uses `<SUBJECT_CREATE>` and `<SUBJECT_LIST>` placeholders — substitu
     model: claude-sonnet-4-6
     tool: claude
     mcp_servers:
-    - ao
+    - animus
     - content-library
     - search-console
     - exa
@@ -582,7 +627,7 @@ Directive uses `<SUBJECT_CREATE>` and `<SUBJECT_LIST>` placeholders — substitu
     - brave
     - firecrawl
     system_prompt: |
-      SKILLS: Read and follow .ao/skills/content-strategy.md AND the
+      SKILLS: Read and follow .animus/skills/content-strategy.md AND the
       animus-subject-operations skill (auto-loaded) for correct subject
       API usage.
 
@@ -594,7 +639,7 @@ Directive uses `<SUBJECT_CREATE>` and `<SUBJECT_LIST>` placeholders — substitu
       Hard rule: LINEAR_DISCOVERY_PROJECT_ID must be set (skip reason
       "missing_project_id" otherwise).
 
-      Cursor discipline: advance .ao/state/discovery-cursor.json ONLY after
+      Cursor discipline: advance .animus/state/discovery-cursor.json ONLY after
       a transcript is fully processed (every surviving angle has either
       become a subject or been confirmed-duplicate). Fail mid-transcript
       leaves cursor at the previous transcript.
@@ -630,11 +675,11 @@ Directive uses `<SUBJECT_CREATE>` and `<SUBJECT_LIST>` placeholders — substitu
            i.   Compute idempotency key:
                 "discovery:<transcript_id>:<8-char hash of (transcript_id + angle title)>"
            ii.  Check for existing subject:
-                <SUBJECT_LIST> --kind linear (scoped to project) filtering
+                <SUBJECT_LIST> --kind issue (scoped to project) filtering
                 description for the idempotency key.
                 If found, skip (created in a prior run).
            iii. Create the subject (note: CLI flag is --body, NOT --description):
-                <SUBJECT_CREATE> --kind linear --title "<headline>" \
+                <SUBJECT_CREATE> --kind issue --title "<headline>" \
                   --body "<structured markdown body with sections:
                     ## Source / Transcript: <id> @ <ts> / Quote: '<quote>'
                     ## Suggested target keyword / '<keyword>' GSC stats
@@ -648,7 +693,7 @@ Directive uses `<SUBJECT_CREATE>` and `<SUBJECT_LIST>` placeholders — substitu
                 plugin auto-maps Linear's backlog state-type).
         f. AFTER all surviving angles for this transcript have been
            created-or-confirmed-duplicate, atomically write
-           .ao/state/discovery-cursor.json:
+           .animus/state/discovery-cursor.json:
              { "last_processed_id":"<transcript id>",
                "last_processed_at":"<transcript created_at>",
                "updated_at":"<current ISO8601>" }
@@ -699,7 +744,7 @@ git commit -m "Add idea-strategist agent and phase; cursor advances per-transcri
     model: claude-haiku-4-5
     tool: claude
     mcp_servers:
-    - ao
+    - animus
     system_prompt: |
       SKILLS: animus-subject-operations + animus-queue-management +
       animus-task-management.
@@ -725,8 +770,8 @@ The exact enqueue invocation depends on preflight Step 6 outcome (probe A = task
     agent: approval-watcher
     directive: |
       Step 1 — Read seen set
-      mkdir -p .ao/state
-      Read .ao/state/approval-seen.json. If missing, treat as
+      mkdir -p .animus/state
+      Read .animus/state/approval-seen.json. If missing, treat as
       {"issues":[], "updated_at":null}.
       Schema reminder: each entry is
         { "subject_id": "...", "last_approved_at": "ISO8601" }.
@@ -734,7 +779,7 @@ The exact enqueue invocation depends on preflight Step 6 outcome (probe A = task
       so re-approvals after a failed run can be re-enqueued.
 
       Step 2 — List Linear-backed subjects with status=in_progress
-      <SUBJECT_LIST> --kind linear --status in_progress --json
+      <SUBJECT_LIST> --kind issue --status in_progress --json
       Capture for each: subject_id, title, body, project_id, AND the
       transition timestamp field identified in preflight Step 6.5
       (call it <TRANSITION_TS_FIELD> — typically state_updated_at,
@@ -833,7 +878,7 @@ git commit -m "Add approval-watcher: status=in_progress filter, task-wrapped que
     model: claude-haiku-4-5
     tool: claude
     mcp_servers:
-    - ao
+    - animus
     system_prompt: |
       SKILLS: animus-subject-operations (auto-loaded) for correct subject
       API usage.
@@ -858,7 +903,7 @@ git commit -m "Add approval-watcher: status=in_progress filter, task-wrapped que
       Input: linear_subject_id (from --input-json of the queue dispatch).
 
       Step 1 — Cancellation guard
-      <SUBJECT_GET> --kind linear --id <linear_subject_id>
+      <SUBJECT_GET> --kind issue --id <linear_subject_id>
       If status != "in_progress", emit FAIL with reason
       "subject_no_longer_in_progress". Do not post any comment.
       (Handles the race where a human cancels post-approval, before run starts.)
@@ -866,7 +911,7 @@ git commit -m "Add approval-watcher: status=in_progress filter, task-wrapped que
       Step 2 — Post start comment
       Read animus run_id from runtime context.
       Read branch: `git rev-parse --abbrev-ref HEAD`.
-      <SUBJECT_COMMENT> --kind linear --id <linear_subject_id> --body "
+      <SUBJECT_COMMENT> --kind issue --id <linear_subject_id> --body "
         🤖 Blog generation started.
         Run: <run_id>
         Branch: <branch>"
@@ -905,7 +950,7 @@ git commit -m "Add approval-watcher: status=in_progress filter, task-wrapped que
       Read content/manifest.json entry for this slug (register-post just wrote it).
 
       Step 1 — Post completion comment
-      <SUBJECT_COMMENT> --kind linear --id <linear_subject_id> --body "
+      <SUBJECT_COMMENT> --kind issue --id <linear_subject_id> --body "
         ✅ Blog draft ready for review.
         Title: <title>
         Slug: <slug>
@@ -916,7 +961,7 @@ git commit -m "Add approval-watcher: status=in_progress filter, task-wrapped que
 
       Step 2 — Optional status transition
       If LINEAR_FINALIZE_TRANSITION == "done":
-        <SUBJECT_UPDATE> --kind linear --id <linear_subject_id> --status done
+        <SUBJECT_UPDATE> --kind issue --id <linear_subject_id> --status done
       Else:
         Leave status alone (human moves to their team's In Review state).
 
@@ -967,7 +1012,7 @@ In the existing `content-strategist:` agent block, replace its `mcp_servers:` li
 Before:
 ```yaml
     mcp_servers:
-    - ao
+    - animus
     - exa
     - tavily
     - brave
@@ -978,7 +1023,7 @@ Before:
 After:
 ```yaml
     mcp_servers:
-    - ao
+    - animus
     - exa
     - tavily
     - brave
@@ -999,7 +1044,7 @@ After:
       Input: linear_subject_id (threaded from ticket-acknowledge).
 
       Step 1 — Re-fetch the subject (mandatory)
-      <SUBJECT_GET> --kind linear --id <linear_subject_id>
+      <SUBJECT_GET> --kind issue --id <linear_subject_id>
       Capture: title, description, status, comments.
 
       Step 2 — Cancellation guard
@@ -1716,8 +1761,8 @@ Expected: krisp / content-library each once; subjects: top-level present; `linea
 - [ ] **Step 7: State dir fully ignored**
 
 ```bash
-git check-ignore .ao/state/anything
-test -f .ao/state/.gitkeep && echo "BUG: gitkeep present" || echo "OK: no gitkeep"
+git check-ignore .animus/state/anything
+test -f .animus/state/.gitkeep && echo "BUG: gitkeep present" || echo "OK: no gitkeep"
 ```
 
 - [ ] **Step 8: No commit**
@@ -1849,7 +1894,7 @@ failure beats mysterious runtime errors.
 
 ### State
 
-Gitignored runtime state (`.ao/state/`):
+Gitignored runtime state (`.animus/state/`):
 - `discovery-cursor.json` — last *processed* Krisp transcript
 - `approval-seen.json` — already-enqueued Linear subject IDs
 - `transcripts/<id>.json` — staged transcripts
@@ -1886,5 +1931,5 @@ Per-round reviewer findings and their resolutions are in [2026-06-05-discovery-f
 - `slug` flows: content-writing → seo-review (now required in contract per Task 8) → register-post → linear-finalize ✓
 - `source_transcript_id` flows: idea-strategist writes to subject description → ticket-to-brief parses → topic_brief → register-post (env) ✓
 - Status filter values are lowercase everywhere ✓
-- Subject CLI uses `--kind linear` (not `--kind linear-discovery`) ✓
+- Subject CLI uses `--kind issue` (the plugin-declared kind, not the workflow YAML alias `linear-discovery` or the backend-config name `linear`) ✓
 - Workflow file path is `.animus/workflows/custom.yaml` everywhere ✓
