@@ -184,7 +184,7 @@ Expected: list includes the plugin with `plugin_kind = "subject_backend"`; info 
 
 - [ ] **Step 3.5: Resolve duplicate subject-kind claims (REQUIRED before any `animus subject` CLI call)**
 
-`animus subject list --kind <any> --limit 1` will fail with `error: duplicate subject kind '<K>' claimed by '<plugin-A>' and '<plugin-B>'` if two installed `subject_backend` plugins both advertise the same kind. The router has no tiebreaker; every subject CLI call is dead until one is uninstalled. Verify the current state and dedupe:
+`animus subject list --kind <any> --limit 1` will fail with `error: duplicate subject kind '<K>' claimed by '<plugin-A>' and '<plugin-B>'` if two installed `subject_backend` plugins both advertise the same kind. The router has no tiebreaker, and the failure is **global** — *every* subject CLI call dies (even `--kind issue` / `--kind requirement`), not just the conflicting kind — until exactly one backend claims each kind. **Verified live on 0.5.14:** a fresh install has **three** `task` claimants (`animus-subject-default`, `animus-subject-markdown`, `animus-subject-sqlite`), so `animus subject list` fails outright.
 
 ```bash
 # List all installed subject backends and their declared kinds.
@@ -194,21 +194,35 @@ for p in $(animus plugin list 2>&1 | awk '/subject_backend/ {print $1}'); do
   animus plugin info --name "$p" --json | jq -r '.data.initialize.capabilities.subject_kinds // []'
 done
 
-# Try a no-op subject call; if it errors with "duplicate subject kind", record the conflicting pair.
-animus subject list --kind issue --limit 1 2>&1 | head -1
+# Confirm the collision:
+animus subject list --kind issue --limit 1 2>&1 | head -1   # -> "duplicate subject kind 'task' ..."
 ```
 
-If a duplicate is reported, uninstall the plugin you don't need for this project:
+**Target kind map for this project (collision-free):**
+
+| Backend | Kind | How | Role |
+|---|---|---|---|
+| `animus-subject-linear` | `issue` | hardcoded | discovery items under review — **lifecycle system-of-record** |
+| `animus-subject-sqlite` | `blogtask` | `ANIMUS_SQLITE_KINDS=blogtask` (env) | local `blog-from-ticket` dispatch wrappers — create-capable, fast |
+| `animus-subject-markdown` | `task` | hardcoded | git-visible content tasks |
+| `animus-subject-requirements` | `requirement` | hardcoded | unused, harmless |
+| `animus-subject-default` | — | **uninstall** | redundant `task` claimant |
+
+Apply it:
 
 ```bash
-# Common pair on a fresh `install-defaults --include-subjects` install:
-#   animus-subject-default + animus-subject-sqlite both claim 'task'.
-# Keep whichever the project actually uses (markdown-backed vs sqlite-backed
-# task storage). Uninstall the other.
-animus plugin uninstall <unused-backend>
+# 1. Move sqlite off 'task' onto a dedicated local kind. Env var, read at daemon
+#    start (verified wired in the plugin source: src/config.rs ENV_KINDS).
+#    Goes in the daemon's parent shell (the daemon does not auto-load .env).
+export ANIMUS_SQLITE_KINDS=blogtask
+
+# 2. Drop the redundant 'task' claimant so markdown is the sole 'task' backend.
+animus plugin uninstall animus-subject-default
 ```
 
-Re-run `animus subject list --kind issue --limit 1`. Expected: returns a list (possibly empty) without the duplicate-kind error. **Block all subsequent preflight steps until this is green** — no `animus subject` call works otherwise.
+> **Why this mapping:** `linear` and `markdown` kinds are hardcoded and cannot be relabelled (`linear` is permanently `issue`); only `sqlite` exposes a kind env var. `markdown` cannot `create` (methods are list/get/update/watch only), so it stays the read/track `task` backend, while the create-capable `sqlite` owns the local `blogtask` dispatch log. See the spec's "Subject-backend kind map" + authoritative-lifecycle invariant.
+
+Re-run `animus subject list --kind issue --limit 1` (with `ANIMUS_SQLITE_KINDS=blogtask` exported and the daemon restarted). Expected: returns a list (possibly empty) without the duplicate-kind error, and `animus subject list --kind blogtask --limit 1` routes to sqlite. **Block all subsequent preflight steps until this is green** — no `animus subject` call works otherwise.
 
 - [ ] **Step 4: Confirm the subject CLI surface works**
 
@@ -236,26 +250,27 @@ Expected: both accepted (no schema errors on the filter value). Verify: `ready`,
 
 - [ ] **Step 6: Verify the queue dispatch contract**
 
-The plan's approval-watcher needs to enqueue `blog-from-ticket` carrying `linear_subject_id`. The queue accepts task / requirement / ad-hoc subjects only — not Linear-backed subjects directly. Pick one shape:
+The plan's approval-watcher needs to enqueue `blog-from-ticket` carrying `linear_subject_id`. The queue accepts task / requirement / ad-hoc subjects — not Linear-backed subjects directly. Pick one shape:
 
-**Important:** there is no `animus task` subcommand in v0.5.14. Tasks are subjects of kind `task` — created via `animus subject create --kind task ...`. Verified flag: `--body` (not `--description`).
+**Important:** there is no `animus task` subcommand in v0.5.14. The wrapper here is a **`blogtask`** subject (sqlite-backed, create-capable — set up in Step 3.5) created via `animus subject create --kind blogtask ...`. Verified flag: `--body` (not `--description`). **This probe also answers the open question: does `queue enqueue --task-id` accept a `blogtask`-kind subject, or only `task`?** If only `task`, fall back to Probe B (ad-hoc, no wrapper).
 
-**Probe A (task-subject wrapper):**
+**Probe A (`blogtask` wrapper):**
 ```bash
-# Create a throwaway task-subject and enqueue with input-json
+# Create a throwaway blogtask-subject and enqueue with input-json
 TASK_ID=$(animus subject create \
-  --kind task \
+  --kind blogtask \
   --title "queue probe" \
   --body "queue propagation test" \
   --status ready \
   --json | jq -r '.data.id')
+# If this errors that --task-id requires kind=task, Probe A is out -> use Probe B.
 animus queue enqueue --task-id "$TASK_ID" --workflow-ref hotfix-workflow --input-json '{"probe":"hello"}'
 ```
 Watch the dispatched workflow's phase prompts. Confirm the input-json reached the run: render the first phase prompt and look for "probe":
 ```bash
 animus workflow prompt render --workflow-id <new_id> --phase implementation
 ```
-Clean up: `animus subject status --kind task --id "$TASK_ID" --status cancelled`
+Clean up: `animus subject status --kind blogtask --id "$TASK_ID" --status cancelled`
 
 **Probe B (ad-hoc title — no wrapper subject):**
 ```bash
@@ -306,13 +321,11 @@ subjects:
 
 Run `animus workflow config validate`. Expected: succeeds. Then delete the scratch file. (We confirm shape now to avoid breaking the real custom.yaml in Task 1.)
 
-- [ ] **Step 8: Verify `on_failure` hook support (best-effort)**
+- [ ] **Step 8: `on_failure` hook support — RESOLVED (0.5.14)**
 
-Check the `animus-workflow-authoring` skill via:
-```bash
-grep -i "on_failure\|failure_hook" ~/.claude/skills/animus-workflow-authoring/SKILL.md
-```
-Record whether failure hooks are documented. If yes, `linear-coordinator` will register one in Task 5. If no, the plan falls back to daemon logs being the failure surface.
+**Finding:** there is **no workflow-level on-failure hook.** `on_failure_verdict` exists but is a **command-phase field only** (`references/agents-and-phases.md` lists it under "Advanced command fields" — it labels a single command's failure verdict; it does not run a cleanup phase when the workflow fails). So there is no native way to auto-write a failure state back to Linear.
+
+**Consequence:** the failure seam (a run that dies mid-`blog-from-ticket` leaves the Linear subject at `in_progress`) is reconciled by **human re-approval**, not automation — daemon logs are the failure surface, the human moves the subject back to `ready`→`started`, and the watcher's `(subject_id, transition_ts)` dedup re-dispatches. Acceptable at this volume. `linear-coordinator` (Task 5) does **not** register a failure path. (A future auto-finalizer would need an always-run phase or a trigger plugin watching run failures — out of scope.)
 
 - [ ] **Step 9: Inventory existing Krisp + content-library MCP configuration (non-blocking)**
 
@@ -353,12 +366,13 @@ Create a local note `~/.animus-blog-generator-preflight.md` (outside the repo to
 - `animus-subject-linear` version installed
 - Working subject invocation form (CLI / plugin call / MCP tool)
 - Method names + param shapes from Step 3
-- Working queue dispatch probe (A or B)
+- Working queue dispatch probe (A `blogtask` wrapper, or B ad-hoc) — and whether `--task-id` accepted the `blogtask` kind
+- **Subject-backend kind map applied: `linear=issue`, `sqlite=blogtask` (`ANIMUS_SQLITE_KINDS`), `markdown=task`, `default` uninstalled — `animus subject list` no longer reports a duplicate-kind error**
 - Confirmed status casing values
 - **Project scoping behavior (Step 6.5): backend-filtered vs needs post-filter**
 - **Transition timestamp field name (Step 6.5): `state_updated_at` / `updatedAt` / fallback to `updated_at`**
 - Subject YAML schema confirmed
-- `on_failure` hook support: yes / no
+- `on_failure` hook: none at workflow level (`on_failure_verdict` is command-phase only) — failure reconciled by human re-approval
 - Krisp MCP: existing `command` / `args` / `env` block (if pre-configured) OR `"not configured"`
 - Content-library MCP: existing `command` / `args` / `env` block (if pre-configured) OR `"not configured"` (note: Tasks 6–8 require this to be real, not stubbed — Krisp can be stubbed but content-library is production-critical)
 
@@ -402,9 +416,15 @@ LINEAR_FINALIZE_TRANSITION=            # Optional: set to "done" to auto-complet
 # Content Library MCP
 CONTENT_LIBRARY_URL=
 CONTENT_LIBRARY_TOKEN=
+
+# Subject backends — route sqlite onto a dedicated local kind so it does not
+# collide with markdown's 'task'. Read by the sqlite plugin at daemon start.
+ANIMUS_SQLITE_KINDS=blogtask
 ```
 
 Do NOT add granular per-state IDs (`LINEAR_STATE_BACKLOG_ID` / `IN_PROGRESS_ID` / etc.) — the plugin auto-maps `WorkflowState.type`.
+
+**Daemon-env reminder:** `ANIMUS_SQLITE_KINDS` (like the secrets) must be in the daemon's parent shell — the daemon does not auto-load `.env`. `set -a; source .env; set +a` before `animus daemon start`.
 
 - [ ] **Step 3: Bootstrap `content/manifest.json`**
 
@@ -801,14 +821,18 @@ The exact enqueue invocation depends on preflight Step 6 outcome (probe A = task
           already enqueued for this approval → skip.
 
       Step 5 — Dispatch each enqueue-eligible subject
-      (Use the form verified in preflight Step 6. There is NO `animus task`
-      subcommand — tasks are subjects of kind=task. CLI flag for the
-      task-subject body is --body. CLI flag for ad-hoc queue enqueue
-      is --description.)
+      (Use the form verified in preflight Step 6. The wrapper is a local
+      `blogtask` subject — sqlite-backed, create-capable. CLI flag for its
+      body is --body; ad-hoc queue enqueue uses --description.)
 
-      [Task-subject wrapper form, if Probe A worked]
+      AUTHORITY RULE: the wrapper is a reference-only dispatch log. Store ONLY
+      the linear_subject_id (the run_id is assigned by the dispatch). NEVER
+      read the wrapper's status to decide anything — Linear is the single
+      source of truth for lifecycle; downstream phases re-fetch live Linear.
+
+      [blogtask wrapper form, if Probe A worked]
         TASK_ID=$(animus subject create \
-          --kind task \
+          --kind blogtask \
           --title "Blog: <subject title>" \
           --body "Wraps Linear subject <subject_id> for blog-from-ticket" \
           --status ready \

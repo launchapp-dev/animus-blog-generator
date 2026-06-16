@@ -125,6 +125,27 @@ subjects:
 
 **Wire IDs.** Subject CLI calls use the form `animus subject create --kind issue --title "..." --body "..."` (note: the CLI flag is `--body`, not `--description`; verified against `animus subject create --help`). **Note on `subject/create` availability:** the Linear plugin (v0.1.5) does not declare a `subject/create` capability — the `SubjectBackend` protocol trait has no `create` verb in any released version (verified across `animus-protocol` v0.1.8 → v0.5.6). The upstream protocol expansion that adds it is being worked on separately; until it lands and the Linear plugin ships v0.2.0 with `LinearBackend::create` wired to Linear's `issueCreate` mutation, Task 3 (idea-strategist) cannot create Linear issues through the standard CLI path. The plan acknowledges this gap in its preflight and gates Task 3 accordingly. The plugin emits IDs like Linear's `BLG-105`. Watcher queries filter via `animus subject list --kind issue --status in_progress`. **Project scoping caveat:** the generic `animus subject list` CLI exposes only `--kind / --status / --limit`. The backend's `config.project_id` may or may not be applied as a filter by the plugin internally. The watcher therefore **post-filters** every returned subject by `project_id == LINEAR_DISCOVERY_PROJECT_ID` (read from the subject's metadata) and additionally surfaces a preflight assertion test. If project filtering is not natively enforced by the plugin, the agent can fall back to `animus plugin call --name animus-subject-linear --method subject.list --params '{"project_id":"...", "status":"in_progress"}'`. **Preflight Step 4 resolves which path applies.**
 
+## Subject-backend kind map (collision-free) and the authoritative-lifecycle invariant
+
+Multiple installed `subject_backend` plugins each advertise a subject kind, and the router fails **globally** (every subject CLI call dies) if two claim the same kind — verified live on 0.5.14: `animus subject list` returns *"duplicate subject kind 'task' claimed by …"* and even `--kind issue` / `--kind requirement` fail until it's resolved. The fresh install claims `task` from three backends (`default`, `markdown`, `sqlite`). The kind map for this project:
+
+| Backend | Kind | Locality | Role | Create? |
+|---|---|---|---|---|
+| `animus-subject-linear` | `issue` | remote (Linear API) | discovery items under human review — **the lifecycle system-of-record** | not yet (no `create` verb — see Wire IDs) |
+| `animus-subject-sqlite` | **`blogtask`** (`ANIMUS_SQLITE_KINDS=blogtask`) | local | `blog-from-ticket` queue-wrapper dispatch log — fast, no Linear round-trip | yes (full CRUD) |
+| `animus-subject-markdown` | `task` | local (git-visible `.md`) | hand-authored content tasks | no (read/track only) |
+| `animus-subject-requirements` | `requirement` | local | unused here; kept, harmless | — |
+| `animus-subject-default` | — | — | **uninstalled** (redundant `task` claimant) | — |
+
+`sqlite`'s kind is set via `ANIMUS_SQLITE_KINDS` (env, read at daemon start — verified in the plugin source `src/config.rs`: `pub const ENV_KINDS = "ANIMUS_SQLITE_KINDS"`). `linear` and `markdown` kinds are hardcoded and cannot be relabelled. `linear` is therefore permanently `issue`; that label is forced by the plugin.
+
+**Authoritative-lifecycle invariant.** Linear is the **single source of truth** for the work item's lifecycle (does this idea exist, is it approved, is it done). The local `sqlite` `blogtask` subject is a **subordinate dispatch log** — it stores only `{ linear_subject_id, run_id, dispatched_at }`, never a copy of approval/completion status. Two rules enforce this:
+
+1. **No phase ever branches on the `blogtask` wrapper's status** — only on *live* Linear status (re-fetched). The wrapper is write-once at dispatch, read-once (`linear_subject_id`) in the first phase, then inert.
+2. **Only `linear-finalize` writes lifecycle back to Linear** (completion comment, optional `done` transition).
+
+This is why the `ticket-acknowledge` / `ticket-to-brief` re-fetch guards exist: the pipeline always defers to Linear, so the local log can be stale-then-reconciled without ever becoming a competing authority. The known residual is the failure seam — a run that fails mid-pipeline leaves Linear at `in_progress` (no terminal comment); reconciliation is a human re-approval, which the `(subject_id, transition_ts)` dedup recognises as a fresh dispatch (see Error handling). Animus has no workflow-level on-failure hook to automate this write-back (`on_failure_verdict` is a command-phase field only), and at this volume manual re-approval is acceptable.
+
 ## MCP servers (non-Linear)
 
 Linear is a subject backend, not an MCP server. Two new MCP servers are added to `mcp_servers:` in `.animus/workflows/custom.yaml`.
@@ -160,12 +181,12 @@ Linear is a subject backend, not an MCP server. Two new MCP servers are added to
   2. `animus subject list --kind issue --status in_progress --json`. **Capture each subject's transition-timestamp field** (preflight Step 6.5 resolved which field is exposed: `state_updated_at`, `stateUpdatedAt`, or fallback `updated_at`).
   3. **Project scoping (explicit, not assumed):** if preflight Step 6.5 confirmed that the backend's `config.project_id` does NOT filter the generic-CLI results, post-filter the returned list to keep only subjects where `project_id == LINEAR_DISCOVERY_PROJECT_ID`. If backend scoping is confirmed active, skip this step. Fallback if the generic CLI cannot be project-scoped at all: use `animus plugin call --name animus-subject-linear --method subject.list --params '{"project_id":"...","status":"in_progress"}'`.
   4. Subtract using `(subject_id, transition_timestamp)` dedup: for each candidate, find the matching seen entry by `subject_id`; if absent → enqueue; if `seen.last_approved_at < subject.transition_ts` → enqueue + overwrite (this is a re-approval after a failed run); if `seen.last_approved_at >= subject.transition_ts` → skip. Note `cancelled`, `done`, `blocked`, `ready` are never queried in step 2.
-  5. **Queue handoff:** for each enqueue-eligible subject, the queue dispatches Animus tasks (or requirements, or ad-hoc title subjects) — not Linear-backed subjects directly. There is **no `animus task` subcommand in v0.5.14**; tasks are subjects of `--kind task`. Two viable shapes (preflight Step 6 picks one):
-     - **Shape A (task-subject wrapper):**
-       `TASK_ID=$(animus subject create --kind task --title "<title>" --body "<linear_subject_id stored in body>" --status ready --json | jq -r '.data.id')`
+  5. **Queue handoff:** for each enqueue-eligible subject, the queue dispatches a **local `blogtask` wrapper** (sqlite-backed) — Linear-backed subjects are never enqueued directly. The wrapper is a **reference-only dispatch log** (`{ linear_subject_id, run_id, dispatched_at }`); nothing downstream reads its status. Two viable shapes (preflight Step 6 picks one):
+     - **Shape A (`blogtask` wrapper — preferred):**
+       `TASK_ID=$(animus subject create --kind blogtask --title "<title>" --body "<linear_subject_id>" --status ready --json | jq -r '.data.id')`
        → `animus queue enqueue --task-id "$TASK_ID" --workflow-ref blog-from-ticket --input-json '{"linear_subject_id": "<id>"}'`
-       (note: `animus subject create` uses `--body`; `animus queue enqueue` uses `--description` for the ad-hoc form — the two CLIs have different flag names)
-     - **Shape B (ad-hoc):** `animus queue enqueue --title "<title>" --description "<linear_subject_id>" --workflow-ref blog-from-ticket --input-json '{"linear_subject_id": "<id>"}'`
+       (note: `animus subject create` uses `--body`; `animus queue enqueue` uses `--description` for the ad-hoc form — the two CLIs have different flag names. **Preflight must confirm `--task-id` accepts a `blogtask`-kind subject and not only `task`** — the flag is named `--task-id` for legacy reasons but backs onto generic subjects. If it is `task`-only, fall back to Shape B.)
+     - **Shape B (ad-hoc, no wrapper):** `animus queue enqueue --title "<title>" --description "<linear_subject_id>" --workflow-ref blog-from-ticket --input-json '{"linear_subject_id": "<id>"}'`
      Preflight verifies which propagates `--input-json` through to the dispatched workflow's first phase.
   6. **Update seen set atomically:** for every successfully-enqueued subject, overwrite (or append) the entry `{ subject_id, last_approved_at: subject.transition_ts }`. Write via tmpfile + rename.
   7. If nothing new, emit `skip`.
@@ -340,7 +361,7 @@ animus queue enqueue --task-id <task_id> \
 | Subject backend outage during approval-watch | No subjects enqueued | Retried next tick |
 | Queue enqueue failure | Subject stays absent from `approval-seen.json` | Retried next tick |
 | Manifest write race | — | `register-post` is `mutates_state: true`; runner mutex serializes |
-| Workflow failure mid-`blog-from-ticket` | Subject stays at `in_progress`; no terminal comment | Daemon logs surface failure. To re-run: human moves the subject back to `ready` (any backlog-type state) and then re-approves. The watcher's `(subject_id, last_approved_at)` keyed dedup recognizes the new approval timestamp and enqueues again — keying by `subject_id` alone would have blocked this retry path. |
+| Workflow failure mid-`blog-from-ticket` | Linear subject (the authority) stays at `in_progress`; no terminal comment. The local `blogtask` wrapper is now a stale dispatch log — **not authoritative**, never read for status. | Daemon logs surface failure. To re-run: human moves the subject back to `ready` (any backlog-type state) and then re-approves. The watcher's `(subject_id, last_approved_at)` keyed dedup recognizes the new approval timestamp and enqueues again — keying by `subject_id` alone would have blocked this retry path. (No workflow-level on-failure hook exists to auto-write the failure back to Linear; manual re-approval is the reconciliation — acceptable at this volume.) |
 | **Human cancels ticket after approval** | Subject becomes `cancelled` mid-pipeline | **`ticket-acknowledge` and `ticket-to-brief` re-check status** and emit a clean abort with reason `subject_no_longer_in_progress`. No comment is posted to the cancelled ticket. Pipeline halts; queue dispatch task is marked failed. |
 | Human edits ticket body between approval and processing | — | `ticket-to-brief` re-fetches at brief time |
 
@@ -372,7 +393,7 @@ These are resolved during the dependency preflight task; none should be guessed.
 4. **Krisp MCP existing config** — this design does not install new MCP servers; preflight inventories whether Krisp is already wired up elsewhere (`.mcp.json`, the workflow YAML's `mcp_servers:`, or daemon-level config). Outcome is either "use existing `command` / `args` / `env`" or "not configured — leave as TODO stub; the discovery workflow runs no-op until wired."
 5. **Content-library MCP existing config** — same approach. Outcome is either "use existing `command` / `args` / `env`" or "not configured — **defer Tasks 6–8** until wired" (stubbing this MCP would break the production pipeline, not just discovery, because `content-strategist`, `content-writer`, and `seo-optimizer` all consume it in `blog-production` and `blog-from-ticket`).
 6. **`LINEAR_FINALIZE_TRANSITION` behavior** — default unset = no transition; `=done` = mark complete. If the team needs a granular "In Review" state, document the `animus plugin call --name animus-subject-linear` path for setting a specific Linear state by ID.
-7. **`on_failure` hook support in v0.5.14** — if supported, `linear-coordinator` registers a failure path that posts an error comment.
+7. **`on_failure` hook support** — **resolved (0.5.14):** there is no workflow-level on-failure hook. `on_failure_verdict` is a **command-phase field only** (it labels a single command's failure verdict; it does not run a cleanup phase on workflow failure). So failure write-back to Linear is **not** automated; the failure seam is reconciled by human re-approval (see Error handling). A future auto-finalizer would need an always-run phase or a trigger plugin watching run failures — out of scope.
 
 ## Reference — relevant Animus skills
 
