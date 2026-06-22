@@ -68,6 +68,29 @@ mcp_servers:
     - '@perplexity/modelcontextprotocol'
     env:
       PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY:-UNSET}
+  krisp:
+    # TODO: replace with the real Krisp MCP command/args/env once configured.
+    # Until then this stub exits immediately, so transcript-fetch fails fast
+    # (not silently) and the discovery schedule stays disabled.
+    command: "true"
+    args: []
+    env: {}
+  content-library:
+    # TODO: replace with the real content-library MCP command/args/env.
+    # Hard precondition for Tasks 6-14 (content-strategist/writer/seo-optimizer);
+    # leave stubbed until real, and do not wire it into those agents yet.
+    command: "true"
+    args: []
+    env: {}
+subjects:
+  - id: linear-discovery
+    backend: linear
+    config:
+      # Real values go in .env (sourced into the daemon's shell). Uses the
+      # repo's :-UNSET convention so config compiles before secrets exist; the
+      # linear backend stays non-functional until LINEAR_API_TOKEN is set.
+      team_id: ${LINEAR_TEAM_ID:-UNSET}
+      project_id: ${LINEAR_DISCOVERY_PROJECT_ID:-UNSET}
 agents:
   content-strategist:
     model: claude-sonnet-4-6
