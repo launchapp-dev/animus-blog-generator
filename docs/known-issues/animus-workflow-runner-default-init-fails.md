@@ -1,6 +1,14 @@
 # Bug: `animus-workflow-runner-default` v0.3.0 fails plugin initialization
 
-**Status:** open
+> **Status: superseded (2026-06-06).** Root cause traced — it's not in this plugin. The plugin works correctly. The daemon's `PluginHost::handshake()` (the path `animus plugin ping/info/call` use) sends a v1.0 `initialize` frame missing `init_extensions.project_binding`, which v1.1.0 plugins like this one require. The runtime path (`call_workflow_execute` / `call_workflow_run_phase` in `plugin_clients.rs`) hand-rolls the v1.1.0 frame correctly, so actual workflow execution is **not affected** — only the diagnostic CLI commands fail. The "we're locked into the legacy runner" + "v0.5-only features silently won't be active" concerns in the original Impact section below are wrong; this plugin IS the runner serving your workflows today. See `animus-cli-handshake-missing-project-binding.md` for the real diagnosis and proposed fix. The upstream issue at `launchapp-dev/animus-workflow-runner-default#2` will be closed by pointing at the `animus-cli` fix.
+>
+> One caveat I haven't empirically verified: that your workflows actually route through `call_workflow_execute` (plugin handshake path) rather than `build_runner_command_from_dispatch` (direct-execute CLI subprocess path). Both invoke the same `animus-workflow-runner-default` binary, but the latter doesn't use the JSON-RPC handshake at all. Either way, the legacy `oai-agent` fallback isn't what's running.
+>
+> The historical analysis below is kept for the investigation trail.
+
+---
+
+**Status:** superseded — see `animus-cli-handshake-missing-project-binding.md`
 **Discovered:** 2026-06-05
 **Plugin:** `animus-workflow-runner-default` v0.3.0 (kind: `workflow_runner`)
 **Installed at:** `~/.animus/plugins/animus-workflow-runner-default` (23 MB binary)

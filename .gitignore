@@ -11,6 +11,8 @@
 .animus/skills/.migrated-from-ao
 .animus/workflows/*.bak
 .animus/state/
+.animus/plugins.lock
+.animus/plugins.lock.lock
 
 # Bundled Animus workflows are scaffolded into .animus/workflows/ by
 # `animus init`; they aren't project state. The project-specific blog
@@ -31,3 +33,6 @@
 
 # Node
 node_modules/
+
+# Agent-host config
+.codex/

@@ -1,6 +1,12 @@
 # Bug: `animus-queue-default` v0.2.0 fails plugin initialization
 
-**Status:** open
+> **Status: superseded (2026-06-06).** Root cause traced — it's not in this plugin. The plugin works correctly. The daemon's `PluginHost::handshake()` (the path `animus plugin ping/info/call` use) sends a v1.0 `initialize` frame missing `init_extensions.project_binding`, which v1.1.0 plugins like this one require. The runtime path (`call_queue_*` in `plugin_clients.rs`) hand-rolls the v1.1.0 frame correctly, so actual queue dispatch is **not affected** — only the diagnostic CLI commands fail. The "we can't validate the v0.5 plugin-routed queue dispatch path" concern in the original Impact section below is wrong; that path is what's running today. See `animus-cli-handshake-missing-project-binding.md` for the real diagnosis and proposed fix. The upstream issue at `launchapp-dev/animus-queue-default#2` will be closed by pointing at the `animus-cli` fix.
+>
+> The historical analysis below is kept for the investigation trail.
+
+---
+
+**Status:** superseded — see `animus-cli-handshake-missing-project-binding.md`
 **Discovered:** 2026-06-05
 **Plugin:** `animus-queue-default` v0.2.0 (kind: `queue`)
 **Installed at:** `~/.animus/plugins/animus-queue-default` (1.6 MB binary)
