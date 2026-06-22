@@ -942,6 +942,7 @@ workflows:
   - seo-review
   - asset-generation
   - social-excerpts
+  - register-post
   - push-branch
 - id: refresh-cycle
   name: Refresh Cycle
@@ -962,6 +963,32 @@ workflows:
   description: Daily scan for breaking news, enqueues blog-production if material
   phases:
   - news-scan
+- id: idea-discovery
+  name: Transcript-Driven Idea Discovery
+  description: Poll Krisp transcripts and propose blog ideas as Linear-backed subjects
+  phases:
+  - transcript-fetch
+  - idea-strategist
+- id: approval-watch
+  name: Linear Approval Watcher
+  description: Poll Linear-backed subjects for in_progress status and dispatch blog-from-ticket
+  phases:
+  - approval-watcher
+- id: blog-from-ticket
+  name: Blog Generation from Approved Linear Subject
+  description: Generate a blog post from a human-approved Linear discovery subject
+  phases:
+  - ticket-acknowledge
+  - ticket-to-brief
+  - research-collection
+  - content-writing
+  - commit-draft
+  - seo-review
+  - asset-generation
+  - social-excerpts
+  - register-post
+  - push-branch
+  - linear-finalize
 schedules:
 - id: blog-primary
   cron: 0 8 * * 2
@@ -983,3 +1010,14 @@ schedules:
   cron: 0 6 * * *
   workflow_ref: news-monitor
   enabled: true
+- id: discovery
+  cron: "0 7 * * *"
+  workflow_ref: idea-discovery
+  # Disabled until Krisp + Linear secrets are configured in .env (placeholders
+  # are in .env.example). Flip to true once the backend is live.
+  enabled: false
+- id: approval-watch
+  cron: "*/15 * * * *"
+  workflow_ref: approval-watch
+  # Disabled until Linear secrets are configured. Flip to true with discovery.
+  enabled: false
