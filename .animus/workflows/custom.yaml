@@ -108,7 +108,10 @@ agents:
       CONTEXT: Read business-context.yaml for all client details — business info,
       target audience, competitors, content pillars, and differentiators.
 
-      Use Animus tools (animus_task_create, animus_queue_enqueue) for urgent news topics.
+      Only in the news-scan / discovery phases: create tasks via
+      animus_task_create and enqueue via animus_queue_enqueue for genuinely
+      time-sensitive topics. When converting an existing ticket to a brief, do
+      NOT create new subjects.
   content-researcher:
     model: claude-sonnet-4-6
     tool: claude
@@ -118,6 +121,19 @@ agents:
     - tavily
     - brave
     - google-maps
+    system_prompt: |
+      CONTEXT: Read business-context.yaml — niche, audience, market area,
+      competitors. Ground every search in that context.
+
+      You gather source material for the content-writer; you do not write prose.
+
+      SOURCING RULES:
+      - Prefer primary, recent, authoritative sources (industry/market reports,
+        government or census data, named studies). Capture the exact source URL
+        and publication date for each.
+      - Every statistic must carry an attributable source — no orphan numbers.
+      - Include local/market context when the niche is geo-relevant.
+      - Flag claims you could not verify instead of passing them through.
   content-writer:
     model: claude-opus-4-6
     tool: claude
@@ -133,7 +149,8 @@ agents:
       relevant to the business's market area.
 
       CONTENT RULES: Get to the point in 3-4 sentences. All claims need citations.
-      Target readability >= 70. Structure for scannability — headers, bullets, tables.
+      Target readability: US grade 8-10 (Flesch Reading Ease ~60-70).
+      Structure for scannability — headers, bullets, tables.
       Include Q&A sections for LLM extractability. Use specific numbers with sources.
       Include "As of [date]..." for recency signals.
 
@@ -183,11 +200,20 @@ agents:
     - replicate
     system_prompt: |
       SKILLS: Read and follow .animus/skills/social-content.md
-      CONTEXT: Read business-context.yaml for brand voice and social media guidelines.
+      CONTEXT: Read business-context.yaml for brand voice, social guidelines,
+      and visual aesthetic.
 
-      SOCIAL CONTENT RULES:
+      You produce two asset types depending on the phase: a featured IMAGE, or
+      SOCIAL excerpts.
+
+      IMAGE RULES (asset-generation, image-regen):
+      - Style: professional photography relevant to the business niche, natural
+        lighting. No text overlays, watermarks, or AI artifacts. 16:9.
+      - Model: google/nano-banana-pro. Save to assets/<slug>.webp.
+
+      SOCIAL CONTENT RULES (social-excerpts):
       - Instagram: short, emoji-friendly, 5-10 hashtags, hook-first
-      - Facebook: conversational, end with question to drive comments
+      - Facebook: conversational, end with a question to drive comments
       - LinkedIn: professional, data-forward, insight-led
       - Adapt per platform — never copy-paste across channels
   performance-analyst:
@@ -211,7 +237,8 @@ agents:
       .animus/skills/ai-seo.md, .animus/skills/content-humanizer.md
       CONTEXT: Read business-context.yaml for client details and voice guidelines.
 
-      Same voice and content rules as the content-writer.
+      Voice and content rules are defined in the skills above; apply them
+      identically to the content-writer.
       Focus on updating statistics, prices, rates, and time-sensitive claims.
       Maintain the original unique angle while incorporating competitor improvements.
       Structure for AI citability — extractable chunks, attributed statistics, Q&A.
@@ -565,9 +592,8 @@ phases:
 
       1. Read content/<slug>.md to understand the topic
       2. Read business-context.yaml for the business niche and aesthetic
-      3. Craft a detailed image prompt. Style: professional photography
-         relevant to the business niche, natural lighting,
-         no text overlays or watermarks.
+      3. Craft a detailed image prompt for the topic (follow the IMAGE RULES
+         in your system prompt).
       4. Call create_models_predictions with model_owner="google",
          model_name="nano-banana-pro", input={ prompt: "...", aspect_ratio: "16:9" }
       5. Poll get_predictions until status is "succeeded"
@@ -685,9 +711,8 @@ phases:
 
       1. Read the blog post from content/<slug>.md (the slug is in the task description)
       2. Read business-context.yaml for the business niche and aesthetic
-      3. Craft a detailed image prompt based on the post content.
-         Style: professional photography relevant to the niche,
-         natural lighting. No text overlays, watermarks, or AI artifacts.
+      3. Craft a detailed image prompt based on the post content (follow the
+         IMAGE RULES in your system prompt).
       4. Call create_models_predictions with model_owner="google",
          model_name="nano-banana-pro", input={ prompt: "...", aspect_ratio: "16:9" }
       5. Poll get_predictions until status is "succeeded"
