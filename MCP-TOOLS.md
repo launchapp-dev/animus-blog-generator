@@ -1,6 +1,6 @@
 # MCP Tools
 
-The blog generator ships with **9 MCP servers** that give agents access to search, scraping, analytics, image generation, and self-orchestration.
+The blog generator ships with **11 MCP servers** that give agents access to search, scraping, analytics, image generation, transcript ingest, content library, and self-orchestration.
 
 ## Search & Discovery
 
@@ -34,18 +34,44 @@ The blog generator ships with **9 MCP servers** that give agents access to searc
 
 | Server | Package | What It Does |
 |--------|---------|--------------|
-| **ao** | `ao mcp serve` | Animus self-management — task creation, queue management, lets agents schedule follow-up work |
+| **animus** | `animus mcp serve` | Animus self-management — task/subject creation, queue management, lets agents schedule follow-up work |
+
+## Discovery Loop
+
+| Server | Package | What It Does |
+|--------|---------|--------------|
+| **Krisp** | (in workflow YAML) | Audio transcript ingest — source for the idea-discovery pipeline |
+| **Content Library** | (in workflow YAML) | Org-wide content + artifact database — dedup + internal-link selection |
+
+> Both ship as TODO stubs (`command: "true"`) until configured. Krisp may stay stubbed (discovery no-ops); content-library is a hard precondition for the blog-from-ticket generation half.
+
+## Subject Backends
+
+Linear is integrated as an **Animus subject backend** (not an MCP server). The `animus-subject-linear` plugin auto-maps Linear's `WorkflowState.type` to Animus's normalized statuses (`ready / in_progress / blocked / done / cancelled`). The local SQLite backend serves a dedicated `blogtask` kind for queue-wrapper dispatch logs (`ANIMUS_SQLITE_KINDS=blogtask`).
+
+| Backend | Kind | What It Does |
+|---|---|---|
+| **Linear** | `issue` | Linear issues as Animus subjects — the human-review system-of-record |
+| **SQLite** | `blogtask` | Local `blog-from-ticket` dispatch log (reference-only) |
+| **Markdown** | `task` | Git-visible content tasks |
+
+One-time install: `animus plugin install launchapp-dev/animus-subject-linear`
 
 ## Which Agents Use What
 
 ```
-Strategist        → ao, exa, tavily, brave, firecrawl, search-console
-Researcher        → firecrawl, exa, tavily, brave, google-maps
-Writer            → (none — pure writing)
-SEO Optimizer     → search-console, firecrawl
-Asset Generator   → replicate
-Performance Analyst → ao, search-console, exa, perplexity
-Content Refresher → firecrawl
+Strategist           → animus, exa, tavily, brave, firecrawl, search-console, content-library
+Researcher           → firecrawl, exa, tavily, brave, google-maps
+Writer               → content-library
+SEO Optimizer        → search-console, firecrawl, content-library
+Asset Generator      → replicate
+Performance Analyst  → animus, search-console, exa, perplexity
+Content Refresher    → firecrawl
+Transcript Collector → krisp
+Idea Strategist      → animus, content-library, search-console, exa, tavily, brave, firecrawl
+Approval Watcher     → animus
+Linear Coordinator   → animus
+Register Post Runner → (local script only)
 ```
 
 ## Bring Your Own CMS

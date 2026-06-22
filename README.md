@@ -151,6 +151,57 @@ Each agent is a Claude instance with a focused role:
 
 All agents read `business-context.yaml` for your business details, brand voice, and content strategy. The content-writing agents also follow skill files in `.animus/skills/` that encode best practices for content production, SEO, humanization, and social media.
 
+## Discovery Flow (transcript-driven)
+
+In addition to the cron-driven `blog-production` pipeline, this generator supports a transcript-driven discovery loop with a human-review gate in Linear (integrated as an Animus subject backend).
+
+**Daily 7am — `idea-discovery`.** Polls Krisp for new transcripts. The strategist proposes 3–5 angles per transcript, each pre-validated with Search Console + competitor scan + spot-scraped citable sources. Surviving angles become Linear issues (Animus subjects) at status `ready`.
+
+**Every 15 min — `approval-watch`.** Polls Linear-backed subjects for `status == in_progress` (the human-approval signal) and dispatches each newly-approved subject to `blog-from-ticket` via the queue (carrying `linear_subject_id`). Cancelled/Done/Blocked are filtered out.
+
+**Per approved ticket — `blog-from-ticket`.** A variant of blog-production using the Linear ticket as the topic brief. `ticket-acknowledge` and `ticket-to-brief` both re-check the subject's status; if the human cancelled after approval, the run aborts cleanly. `register-post` runs before `push-branch` so the manifest commit ships with the push. The last phase posts a completion comment; status transition is opt-in via `LINEAR_FINALIZE_TRANSITION=done`.
+
+**Authoritative-lifecycle invariant.** Linear is the single source of truth for lifecycle. The local SQLite `blogtask` wrapper is a subordinate, reference-only dispatch log — no phase reads its status; only `linear-finalize` writes back.
+
+### One-time setup
+
+```bash
+animus plugin install launchapp-dev/animus-subject-linear
+animus plugin list
+animus plugin ping --name animus-subject-linear
+```
+
+### Daemon environment (`.env` is NOT auto-loaded)
+
+The Animus daemon does **not** auto-load `.env`. Source it into the daemon's parent shell before starting:
+
+```bash
+set -a; source .env; set +a
+animus daemon start --autonomous
+```
+
+`ANIMUS_SQLITE_KINDS=blogtask` must be in that environment too — it routes the local SQLite backend onto a dedicated kind so it doesn't collide with markdown's `task`.
+
+### Required `.env` values (placeholders are in `.env.example`)
+
+- `KRISP_API_KEY`
+- `LINEAR_API_TOKEN`, `LINEAR_TEAM_ID`, `LINEAR_DISCOVERY_PROJECT_ID`
+- `CONTENT_LIBRARY_URL`, `CONTENT_LIBRARY_TOKEN`
+- `ANIMUS_SQLITE_KINDS=blogtask`
+
+Optional: `LINEAR_STATUS_MAP`, `LINEAR_FINALIZE_TRANSITION=done`.
+
+The `discovery` and `approval-watch` schedules ship **disabled** — flip them to `enabled: true` in `.animus/workflows/custom.yaml` once the secrets above are set and the daemon has been restarted.
+
+### State
+
+Gitignored runtime state (`.animus/state/`):
+- `discovery-cursor.json` — last *processed* Krisp transcript
+- `approval-seen.json` — already-enqueued Linear subject IDs
+- `transcripts/<id>.json` — staged transcripts
+
+Tracked in repo (`content/manifest.json`): the canonical list of every post this generator produces — written by `register-post`, consumed for dedup + real internal-link slugs.
+
 ## Prerequisites
 
 - **[Animus CLI](https://github.com/launchapp-dev/ao-cli)** — Install the Animus command-line tool
