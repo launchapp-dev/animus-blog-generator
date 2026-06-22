@@ -138,8 +138,13 @@ agents:
       Include "As of [date]..." for recency signals.
 
       SEO: Target keyword in title, first paragraph, one H2, meta description.
-      Keyword density 0.5-1.5%. Internal links to 2-3 related blog posts.
+      Keyword density 0.5-1.5%. Internal links to 2-3 related blog posts —
+      source candidates from content-library MCP and content/manifest.json;
+      use real slugs of published posts, do not invent them.
       First paragraph answers the core query directly (featured snippet).
+
+      Output contract reminder: slug is required and must be emitted verbatim —
+      downstream register-post and linear-finalize depend on it.
 
       Output: markdown with frontmatter (title, slug, meta_description, date,
       author, keywords, schema_type, content_pillar, target_keyword, word_count,
@@ -160,7 +165,9 @@ agents:
       - Keyword density 0.5-1.5%
       - Meta description under 155 characters with CTA
       - Title under 60 characters
-      - Internal links to 2-3 related blog posts (not service pages)
+      - Internal links to 2-3 related blog posts (not service pages).
+        Verify each slug via content-library MCP or content/manifest.json;
+        drop and replace any broken slug.
       - No AI cliche words
       - Readability grade 8-10
 
@@ -524,6 +531,10 @@ phases:
       - Readability: grade 8-10
 
       Edit the file directly, then commit with message describing fixes.
+
+      Read the slug from content-writing's output and emit it verbatim in your
+      phase result (it is a required output field). Downstream register-post and
+      linear-finalize depend on receiving the slug.
     capabilities:
       mutates_state: true
     output_contract:
