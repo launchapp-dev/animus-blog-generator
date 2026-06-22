@@ -243,6 +243,52 @@ agents:
       a transcript is fully processed (every surviving angle has either
       become a subject or been confirmed-duplicate). Fail mid-transcript
       leaves cursor at the previous transcript.
+  approval-watcher:
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers:
+    - animus
+    system_prompt: |
+      SKILLS: animus-subject-operations + animus-queue-management +
+      animus-task-management.
+
+      Polling agent. Detects Linear-backed subjects whose Animus status
+      became in_progress (the approval signal) and dispatches blog-from-ticket
+      runs for them.
+
+      Filter rules (use exact lowercase values):
+        - Include: status == in_progress
+        - Exclude: status in {cancelled, done, blocked, ready}
+
+      Scope every query to LINEAR_DISCOVERY_PROJECT_ID.
+  linear-coordinator:
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers:
+    - animus
+    system_prompt: |
+      SKILLS: animus-subject-operations (auto-loaded) for correct subject
+      API usage.
+
+      Manages Linear ticket comments (and optionally status) for
+      blog-from-ticket runs. Two modes:
+      - "acknowledge": re-check status; if still in_progress, post a start
+        comment; if not in_progress, abort cleanly.
+      - "finalize": post a rich completion comment; optionally transition
+        to done if LINEAR_FINALIZE_TRANSITION=done.
+
+      Linear is the single source of truth for lifecycle — only finalize
+      writes status back; never infer state from local wrappers.
+  register-post-runner:
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers: []
+    system_prompt: |
+      You are a one-shot script runner. Read slug from the prior phase output
+      (seo-review's output_contract emits it). Read linear_subject_id and
+      source_transcript_id from the run input / topic_brief phase if
+      available. Run scripts/register-post.sh with those as env vars and
+      capture the last stdout line as commit_message.
 phases:
   transcript-fetch:
     mode: agent
@@ -668,6 +714,213 @@ phases:
       min_confidence: 0.5
       max_risk: low
       allow_missing_decision: false
+  approval-watcher:
+    mode: agent
+    agent: approval-watcher
+    directive: |
+      Step 1 — Read seen set
+      mkdir -p .animus/state
+      Read .animus/state/approval-seen.json. If missing, treat as
+      {"issues":[], "updated_at":null}. Each entry is
+      { "subject_id": "...", "last_approved_at": "ISO8601" }.
+      Key by (subject_id, last_approved_at) — NOT subject_id alone — so a
+      re-approval after a failed run is re-enqueued.
+
+      Step 2 — List Linear-backed subjects with status=in_progress
+      animus subject list --kind issue --status in_progress --json
+      Capture per subject: subject_id, title, body, project_id, and the
+      transition timestamp (state_updated_at / stateUpdatedAt / fallback updated_at).
+
+      Step 3 — Post-filter by project
+      Keep only subjects where project_id == LINEAR_DISCOVERY_PROJECT_ID
+      (skip if the backend already scopes by config.project_id).
+
+      Step 4 — Diff against seen using (subject_id, transition_ts)
+        - No entry            → new approval     → enqueue.
+        - seen_at <  trans_ts → re-approval      → enqueue + overwrite.
+        - seen_at >= trans_ts → already enqueued → skip.
+
+      Step 5 — Dispatch each enqueue-eligible subject
+      The wrapper is a LOCAL blogtask subject (sqlite, create-capable) — a
+      reference-only dispatch log. Store ONLY linear_subject_id; NEVER read the
+      wrapper's status (Linear is the single source of truth).
+        TASK_ID=$(animus subject create --kind blogtask \
+          --title "Blog: <subject title>" \
+          --body "Wraps Linear subject <subject_id> for blog-from-ticket" \
+          --status ready --json | jq -r '.data.id')
+        animus queue enqueue --task-id "$TASK_ID" \
+          --workflow-ref blog-from-ticket \
+          --input-json "{\"linear_subject_id\":\"<subject_id>\"}"
+      (If --task-id rejects the blogtask kind, fall back to ad-hoc:
+        animus queue enqueue --title "Blog: <subject title>" \
+          --description "Linear subject: <subject_id>" \
+          --workflow-ref blog-from-ticket \
+          --input-json "{\"linear_subject_id\":\"<subject_id>\"}")
+
+      Step 6 — Update seen set atomically (tmpfile + rename)
+      For each enqueued subject: overwrite/append
+      { subject_id, last_approved_at: transition_ts }; set updated_at = now.
+
+      Step 7 — Verdict
+      Nothing newly approved → skip (reason "no_approvals"). Else emit the
+      enqueued list.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - enqueued
+      fields:
+        enqueued:
+          type: array
+    decision_contract:
+      min_confidence: 0.5
+      max_risk: low
+      allow_missing_decision: true
+  ticket-acknowledge:
+    mode: agent
+    agent: linear-coordinator
+    directive: |
+      Mode: acknowledge.
+      Input: linear_subject_id (from --input-json of the queue dispatch).
+
+      Step 1 — Cancellation guard
+      animus subject get --kind issue --id <linear_subject_id> --json
+      If status != "in_progress", emit FAIL with reason
+      "subject_no_longer_in_progress". Post no comment. (Handles a human
+      cancelling post-approval, before the run starts.)
+
+      Step 2 — Post start comment (Linear via the plugin's comment method):
+        animus plugin call --name animus-subject-linear --method subject/update \
+          --params '{"id":"<linear_subject_id>","patch":{"comment":"🤖 Blog generation started. Run: <run_id>  Branch: <branch>"}}'
+      Read run_id from runtime context; branch from `git rev-parse --abbrev-ref HEAD`.
+
+      Step 3 — Pass through
+      Output linear_subject_id for downstream phases. Do NOT transition status
+      (the human already moved it to in_progress).
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - linear_subject_id
+      fields:
+        linear_subject_id:
+          type: string
+  ticket-to-brief:
+    mode: agent
+    agent: content-strategist
+    directive: |
+      Convert an approved Linear-backed subject into a topic_brief.
+      Input: linear_subject_id (threaded from ticket-acknowledge).
+
+      Step 1 — Re-fetch the subject (mandatory)
+      animus subject get --kind issue --id <linear_subject_id> --json
+      Capture: title, body, status, comments.
+
+      Step 2 — Cancellation guard
+      If status != "in_progress", emit FAIL with reason
+      "subject_no_longer_in_progress" (defense in depth — human may have
+      cancelled between phases).
+
+      Read business-context.yaml. Read content/manifest.json.
+
+      Step 3 — Parse the body sections (humans may have edited them):
+        - suggested_pillar (## Suggested pillar)
+        - suggested_keyword (## Suggested target keyword, first quoted string)
+        - pre_identified_sources (## Pre-identified citable sources)
+        - source_transcript_id (## Source)
+
+      Step 4 — Refine keyword via Search Console; prefer a better-shaped variant.
+
+      Step 5 — Build topic_brief (same shape topic-research produces):
+        target_keyword, content_pillar, word_count_target (1200-2500),
+        unique_angle (incl. transcript context), data_sources_needed (start
+        from pre_identified_sources), internal_link_targets (content-library +
+        manifest; 2-3 slugs), linear_subject_id + source_transcript_id (pass
+        through), slug_hint (kebab-case from title).
+
+      Do NOT do deep external research here.
+    capabilities:
+      mutates_state: false
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - topic_brief
+      fields:
+        topic_brief:
+          type: object
+        target_keyword:
+          type: string
+        content_pillar:
+          type: string
+        linear_subject_id:
+          type: string
+        source_transcript_id:
+          type: string
+        slug_hint:
+          type: string
+  linear-finalize:
+    mode: agent
+    agent: linear-coordinator
+    directive: |
+      Mode: finalize.
+      Inputs: linear_subject_id (threaded), slug (from seo-review), branch
+      (`git rev-parse --abbrev-ref HEAD`), commit_message (from register-post).
+
+      Read content/<slug>.md frontmatter for title + meta_description, and the
+      content/manifest.json entry for this slug.
+
+      Step 1 — Post completion comment:
+        animus plugin call --name animus-subject-linear --method subject/update \
+          --params '{"id":"<linear_subject_id>","patch":{"comment":"✅ Blog draft ready for review. Title: <title>  Slug: <slug>  Words: <word_count>  Branch: <branch>  Meta: <meta_description>  Image: assets/<slug>.webp"}}'
+
+      Step 2 — Optional status transition
+      If LINEAR_FINALIZE_TRANSITION == "done":
+        animus subject update --kind issue --id <linear_subject_id> --status done
+      Else leave status alone (human moves to their team's In Review state).
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - linear_subject_id
+      fields:
+        linear_subject_id:
+          type: string
+        comment_id:
+          type: string
+  register-post:
+    mode: agent
+    agent: register-post-runner
+    directive: |
+      Read inputs:
+        - slug: from seo-review's phase result (required)
+        - linear_subject_id: from the run input (empty for cron blog-production)
+        - source_transcript_id: from ticket-to-brief's topic_brief (empty otherwise)
+
+      Run via Bash:
+        env LINEAR_SUBJECT_ID="<linear_subject_id or empty>" \
+            SOURCE_TRANSCRIPT_ID="<source_transcript_id or empty>" \
+            bash scripts/register-post.sh "<slug>"
+
+      Parse the last non-empty stdout line as commit_message.
+
+      Output: slug (pass-through), linear_subject_id (pass-through), commit_message.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: implementation_result
+      required_fields:
+      - commit_message
+      - slug
+      fields:
+        commit_message:
+          type: string
+        slug:
+          type: string
+        linear_subject_id:
+          type: string
 workflows:
 - id: blog-production
   name: Blog Post Production
