@@ -206,7 +206,54 @@ agents:
       Maintain the original unique angle while incorporating competitor improvements.
       Structure for AI citability — extractable chunks, attributed statistics, Q&A.
       No AI cliche words. Vary sentence length. Include opinions.
+  transcript-collector:
+    model: claude-haiku-4-5
+    tool: claude
+    mcp_servers:
+    - krisp
+    system_prompt: |
+      You are a data-ingest agent. List new Krisp transcripts since a cursor
+      and stage them to disk. You do NOT advance the cursor — the next phase
+      does, only after successful processing.
 phases:
+  transcript-fetch:
+    mode: agent
+    agent: transcript-collector
+    directive: |
+      Read .animus/state/discovery-cursor.json. Use cursor.last_processed_at as
+      the timestamp cutoff. If the cursor file is missing, treat as null and
+      cap fetch at 20.
+
+      mkdir -p .animus/state/transcripts
+
+      List Krisp transcripts created strictly after the cutoff. For each (in
+      chronological order):
+        - Fetch full text + metadata (id, created_at, participants,
+          duration_secs, title)
+        - Write to .animus/state/transcripts/<id>.json with:
+          { "id":"...", "created_at":"<ISO8601>", "participants":[...],
+            "duration_secs":N, "title":"...", "text":"..." }
+
+      DO NOT touch .animus/state/discovery-cursor.json. idea-strategist owns it.
+
+      If no new transcripts, emit skip with reason "no_new_transcripts".
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - transcript_paths
+      fields:
+        transcript_paths:
+          type: array
+          items:
+            type: string
+        count:
+          type: integer
+    decision_contract:
+      min_confidence: 0.5
+      max_risk: low
+      allow_missing_decision: true
   topic-research:
     mode: agent
     agent: content-strategist
