@@ -215,6 +215,34 @@ agents:
       You are a data-ingest agent. List new Krisp transcripts since a cursor
       and stage them to disk. You do NOT advance the cursor — the next phase
       does, only after successful processing.
+  idea-strategist:
+    model: claude-sonnet-4-6
+    tool: claude
+    mcp_servers:
+    - animus
+    - content-library
+    - search-console
+    - exa
+    - tavily
+    - brave
+    - firecrawl
+    system_prompt: |
+      SKILLS: Read and follow .animus/skills/content-strategy.md AND the
+      animus-subject-operations skill (auto-loaded) for correct subject
+      API usage.
+
+      CONTEXT: Read business-context.yaml at every run — niche, pillars,
+      audience, voice, competitors, differentiators. Refuse if missing
+      (skip reason "missing_business_context").
+
+      Propose blog ideas grounded in transcripts and external SEO viability.
+      Hard rule: LINEAR_DISCOVERY_PROJECT_ID must be set (skip reason
+      "missing_project_id" otherwise).
+
+      Cursor discipline: advance .animus/state/discovery-cursor.json ONLY after
+      a transcript is fully processed (every surviving angle has either
+      become a subject or been confirmed-duplicate). Fail mid-transcript
+      leaves cursor at the previous transcript.
 phases:
   transcript-fetch:
     mode: agent
@@ -249,6 +277,73 @@ phases:
           items:
             type: string
         count:
+          type: integer
+    decision_contract:
+      min_confidence: 0.5
+      max_risk: low
+      allow_missing_decision: true
+  idea-strategist:
+    mode: agent
+    agent: idea-strategist
+    directive: |
+      Input: transcript_paths from prior phase. If empty, emit skip.
+
+      Step 1 — Local context
+      Read business-context.yaml. Read content/manifest.json (treat missing
+      as {"version":1,"posts":[]}). Query content-library MCP for topic
+      fingerprints.
+
+      Step 2 — Per-transcript synthesis
+      For each transcript file in transcript_paths IN ORDER:
+        a. Read transcript JSON.
+        b. Extract 3-5 candidate blog angles. Each MUST quote a specific
+           transcript moment with timestamp.
+        c. External validation per candidate:
+           - Search Console: keyword viability (volume, rank, striking distance)
+           - Exa + Tavily + Brave: competitive landscape
+           - Firecrawl: spot-scrape top 1-2 SERP pages + 2-3 citable sources
+        d. Filter/refine: drop dead-keyword angles, re-angle saturated SERPs,
+           drop dupes against content/manifest.json AND content-library.
+        e. For each surviving angle:
+           i.   Compute idempotency key:
+                "discovery:<transcript_id>:<8-char hash of (transcript_id + angle title)>"
+           ii.  Check for an existing subject (scoped to the project):
+                  animus subject list --kind issue --status ready --json
+                filtering the body for the idempotency key. If found, skip
+                (created in a prior run).
+           iii. Create the subject (CLI flag is --body, NOT --description):
+                  animus subject create --kind issue --title "<headline>" \
+                    --body "<structured markdown body with sections:
+                      ## Source / Transcript: <id> @ <ts> / Quote: '<quote>'
+                      ## Suggested target keyword / '<keyword>' GSC stats
+                      ## Competitive landscape / top 3 URLs + gap
+                      ## Pre-identified citable sources / 2-3 URLs
+                      ## Suggested pillar / <pillar>
+                      ## Dedup notes / <notes>
+                      ## Idempotency key / <key>
+                      >"
+                Subjects are created at status=ready by default (the plugin
+                auto-maps Linear's backlog state-type). Requires
+                LINEAR_API_TOKEN + LINEAR_DISCOVERY_PROJECT_ID in the daemon env.
+        f. AFTER all surviving angles for this transcript are
+           created-or-confirmed-duplicate, atomically write
+           .animus/state/discovery-cursor.json:
+             { "last_processed_id":"<transcript id>",
+               "last_processed_at":"<transcript created_at>",
+               "updated_at":"<current ISO8601>" }
+
+      Step 3 — Emit phase result
+      Output: list of {subject_id, title, transcript_id}.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - issues_created
+      fields:
+        issues_created:
+          type: array
+        transcripts_processed:
           type: integer
     decision_contract:
       min_confidence: 0.5
