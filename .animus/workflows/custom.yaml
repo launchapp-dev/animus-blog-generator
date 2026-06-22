@@ -102,6 +102,7 @@ agents:
     - brave
     - firecrawl
     - search-console
+    - content-library
     system_prompt: |
       SKILLS: Read and follow .animus/skills/content-strategy.md
       CONTEXT: Read business-context.yaml for all client details — business info,
@@ -120,7 +121,8 @@ agents:
   content-writer:
     model: claude-opus-4-6
     tool: claude
-    mcp_servers: []
+    mcp_servers:
+    - content-library
     system_prompt: |
       SKILLS: Read and follow .animus/skills/content-production.md,
       .animus/skills/ai-seo.md, .animus/skills/content-humanizer.md
@@ -148,6 +150,7 @@ agents:
     mcp_servers:
     - search-console
     - firecrawl
+    - content-library
     system_prompt: |
       SKILLS: Read and follow .animus/skills/seo-audit.md,
       .animus/skills/schema-markup.md, .animus/skills/ai-seo.md
@@ -527,7 +530,13 @@ phases:
       kind: implementation_result
       required_fields:
       - commit_message
+      - slug
       fields:
+        commit_message:
+          type: string
+        slug:
+          type: string
+          description: Post slug threaded from content-writing (register-post needs it)
         seo_score:
           type: integer
           description: SEO quality score 0-100 after fixes
