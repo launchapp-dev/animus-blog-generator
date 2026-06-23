@@ -1,0 +1,85 @@
+# refresh-cycle — analyze performance, refresh a declining post, re-optimize.
+phases:
+  performance-analysis:
+    mode: agent
+    agent: performance-analyst
+    directive: |
+      Generate the content performance report. Pull Search Console
+      data for all published posts, analyze ranking changes, identify
+      the single most impactful post to refresh (declining traffic,
+      competitor overtook us, or ranking for keywords it doesn't
+      cover well). Check LLM citation status via Perplexity.
+
+      If no post needs refresh, set verdict to skip.
+      If a post needs refresh, output the post path and refresh plan.
+
+      Also: if keyword gaps are found (topics with zero coverage),
+      create tasks via animus_task_create for future blog-production runs.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - report
+      fields:
+        report:
+          type: object
+          description: Performance report with metrics and recommendations
+        refresh_target:
+          type: string
+          description: File path of the post to refresh, or null if none needed
+    decision_contract:
+      min_confidence: 0.5
+      max_risk: low
+      allow_missing_decision: false
+  content-refresh-write:
+    mode: agent
+    agent: content-refresher
+    directive: |
+      Refresh the post identified in the prior phase. Update statistics,
+      prices, rates, and time-sensitive claims with current data from
+      Firecrawl scrapes. If a competitor outranks us, analyze their
+      improvements via Firecrawl and incorporate them while maintaining
+      our unique angle. Update dateModified in frontmatter. Commit changes.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: implementation_result
+      required_fields:
+      - commit_message
+      fields:
+        sections_updated:
+          type: array
+          description: Which sections were refreshed
+          items:
+            type: string
+  refresh-seo-review:
+    mode: agent
+    agent: seo-optimizer
+    directive: |
+      Re-audit the refreshed post. Fix any issues inline and commit:
+      - Verify updated data is present
+      - Keyword positioning maintained
+      - dateModified updated in frontmatter
+      - All standard SEO checks pass (see system prompt)
+      Edit and commit fixes directly.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: implementation_result
+      required_fields:
+      - commit_message
+workflows:
+- id: refresh-cycle
+  name: Refresh Cycle
+  description: Analyze performance, refresh declining post, re-optimize
+  phases:
+  - performance-analysis
+  - content-refresh-write
+  - refresh-seo-review
+  - push-branch
+schedules:
+- id: refresh
+  cron: 0 8 * * 3
+  workflow_ref: refresh-cycle
+  enabled: false

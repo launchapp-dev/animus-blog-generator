@@ -1,3 +1,7 @@
+# ── Shared base ──────────────────────────────────────────────────────────
+# Globals, MCP servers, subjects, all agents, and the SHARED content-pipeline
+# phases. Per-workflow phases + workflow defs + schedules live in workflow-*.yaml.
+# All .animus/workflows/*.yaml compile together (animus workflow config compile).
 default_workflow_ref: standard-workflow
 tools_allowlist:
 - git
@@ -76,9 +80,11 @@ mcp_servers:
     args: []
     env: {}
   content-library:
-    # TODO: replace with the real content-library MCP command/args/env.
-    # Hard precondition for Tasks 6-14 (content-strategist/writer/seo-optimizer);
-    # leave stubbed until real, and do not wire it into those agents yet.
+    # BRING YOUR OWN (macOS): an org "knowledge brain" MCP server that gives
+    # agents deep drafting context — prior research, established facts, brand
+    # positions, and angles already used — so they produce unique, high-quality
+    # content. Replace command/args/env with your own content MCP. Until then
+    # this is a no-op stub; agents fall back to content/manifest.json + research.
     command: "true"
     args: []
     env: {}
@@ -108,6 +114,11 @@ agents:
       CONTEXT: Read business-context.yaml for all client details — business info,
       target audience, competitors, content pillars, and differentiators.
 
+      CONTENT BRAIN: Consult content-library for prior coverage, established
+      facts, and angles already used when selecting topics or building briefs;
+      ground choices in it. If unavailable or empty, use content/manifest.json
+      and external research — do not block.
+
       Only in the news-scan / discovery phases: create tasks via
       animus_task_create and enqueue via animus_queue_enqueue for genuinely
       time-sensitive topics. When converting an existing ticket to a brief, do
@@ -121,11 +132,17 @@ agents:
     - tavily
     - brave
     - google-maps
+    - content-library
     system_prompt: |
       CONTEXT: Read business-context.yaml — niche, audience, market area,
       competitors. Ground every search in that context.
 
       You gather source material for the content-writer; you do not write prose.
+
+      CONTENT BRAIN: Query content-library (the org knowledge brain) for prior
+      research, established facts, and brand positions; treat it as a primary
+      source alongside external search. If it is unavailable or returns nothing,
+      continue with external sources only — do not block.
 
       SOURCING RULES:
       - Prefer primary, recent, authoritative sources (industry/market reports,
@@ -143,6 +160,12 @@ agents:
       SKILLS: Read and follow .animus/skills/content-production.md,
       .animus/skills/ai-seo.md, .animus/skills/content-humanizer.md
       CONTEXT: Read business-context.yaml for client details and voice guidelines.
+
+      CONTENT BRAIN: Before drafting, query content-library for related prior
+      work, established facts, brand positions, and angles already used; ground
+      the post in that context and avoid repeating prior angles. If
+      content-library is unavailable or returns nothing, proceed using
+      content/manifest.json and the research package — do not block.
 
       Write in the voice defined in business-context.yaml. Use the perspective,
       tone, and style specified there. Reference specific locations and details
@@ -238,10 +261,15 @@ agents:
     tool: claude
     mcp_servers:
     - firecrawl
+    - content-library
     system_prompt: |
       SKILLS: Read and follow .animus/skills/content-production.md,
       .animus/skills/ai-seo.md, .animus/skills/content-humanizer.md
       CONTEXT: Read business-context.yaml for client details and voice guidelines.
+
+      CONTENT BRAIN: Pull the post's original context and prior angles from
+      content-library before refreshing, to preserve the unique angle. If
+      unavailable or empty, rely on the existing post + Firecrawl — do not block.
 
       Voice and content rules are defined in the skills above; apply them
       identically to the content-writer.
@@ -277,6 +305,11 @@ agents:
       CONTEXT: Read business-context.yaml at every run — niche, pillars,
       audience, voice, competitors, differentiators. Refuse if missing
       (skip reason "missing_business_context").
+
+      CONTENT BRAIN: Use content-library not just for dedup but to retrieve
+      related context that sharpens and differentiates each angle. If it is
+      unavailable or returns nothing, fall back to content/manifest.json — do
+      not block.
 
       Propose blog ideas grounded in transcripts and external SEO viability.
       Hard rule: LINEAR_DISCOVERY_PROJECT_ID must be set (skip reason
@@ -333,167 +366,6 @@ agents:
       available. Run scripts/register-post.sh with those as env vars and
       capture the last stdout line as commit_message.
 phases:
-  transcript-fetch:
-    mode: agent
-    agent: transcript-collector
-    directive: |
-      Read .animus/state/discovery-cursor.json. Use cursor.last_processed_at as
-      the timestamp cutoff. If the cursor file is missing, treat as null and
-      cap fetch at 20.
-
-      mkdir -p .animus/state/transcripts
-
-      List Krisp transcripts created strictly after the cutoff. For each (in
-      chronological order):
-        - Fetch full text + metadata (id, created_at, participants,
-          duration_secs, title)
-        - If the provider exposes timestamped transcript segments, include
-          segments as:
-          [{ "start":"HH:MM:SS", "end":"HH:MM:SS", "speaker":"...",
-             "text":"..." }]
-        - Write to .animus/state/transcripts/<id>.json with:
-          { "id":"...", "created_at":"<ISO8601>", "participants":[...],
-            "duration_secs":N, "title":"...", "text":"...",
-            "segments":[...] }
-
-      DO NOT touch .animus/state/discovery-cursor.json. idea-strategist owns it.
-
-      If no new transcripts, emit skip with reason "no_new_transcripts".
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: phase_result
-      required_fields:
-      - transcript_paths
-      fields:
-        transcript_paths:
-          type: array
-          items:
-            type: string
-        count:
-          type: integer
-    decision_contract:
-      min_confidence: 0.5
-      max_risk: low
-      allow_missing_decision: true
-  idea-strategist:
-    mode: agent
-    agent: idea-strategist
-    directive: |
-      Input: transcript_paths from prior phase. If empty, emit skip.
-
-      Step 1 — Local context
-      Read business-context.yaml. Read content/manifest.json (treat missing
-      as {"version":1,"posts":[]}). Query content-library MCP for topic
-      fingerprints.
-
-      Step 2 — Per-transcript synthesis
-      For each transcript file in transcript_paths IN ORDER:
-        a. Read transcript JSON.
-        b. Extract 3-5 candidate blog angles. Each MUST quote an exact
-           transcript excerpt. Use timestamps only from transcript.segments; if
-           segments are missing or do not include timing, set
-           timestamp_available=false and do NOT invent timestamps.
-        c. External validation per candidate:
-           - Search Console: keyword viability (volume, rank, striking distance)
-           - Exa + Tavily + Brave: competitive landscape
-           - Firecrawl: spot-scrape top 1-2 SERP pages + 2-3 citable sources
-        d. Filter/refine: drop dead-keyword angles, re-angle saturated SERPs,
-           drop dupes against content/manifest.json AND content-library.
-        e. For each surviving angle:
-           i.   Compute idempotency key:
-                "discovery:<transcript_id>:<8-char hash of (transcript_id + angle title)>"
-           ii.  Check for an existing subject (scoped to the project):
-                  animus subject list --kind issue --status ready --json
-                filtering the body for the idempotency key. If found, skip
-                (created in a prior run).
-           iii. Create the subject (CLI flag is --body, NOT --description):
-                  animus subject create --kind issue --title "<headline>" \
-                    --body "<structured markdown body with sections:
-                      ## Source / Transcript: <id> / Timestamp: <ts or unavailable> / timestamp_available: <true|false> / Quote: '<quote>'
-                      ## Suggested target keyword / '<keyword>' GSC stats
-                      ## Competitive landscape / top 3 URLs + gap
-                      ## Pre-identified citable sources / 2-3 URLs
-                      ## Suggested pillar / <pillar>
-                      ## Dedup notes / <notes>
-                      ## Idempotency key / <key>
-                      >"
-                Subjects are created at status=ready by default (the plugin
-                auto-maps Linear's backlog state-type). Requires
-                LINEAR_API_TOKEN + LINEAR_DISCOVERY_PROJECT_ID in the daemon env.
-        f. AFTER all surviving angles for this transcript are
-           created-or-confirmed-duplicate, atomically write
-           .animus/state/discovery-cursor.json:
-             { "last_processed_id":"<transcript id>",
-               "last_processed_at":"<transcript created_at>",
-               "updated_at":"<current ISO8601>" }
-
-      Step 3 — Emit phase result
-      Output: list of {subject_id, title, transcript_id}.
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: phase_result
-      required_fields:
-      - issues_created
-      fields:
-        issues_created:
-          type: array
-        transcripts_processed:
-          type: integer
-    decision_contract:
-      min_confidence: 0.5
-      max_risk: low
-      allow_missing_decision: true
-  topic-research:
-    mode: agent
-    agent: content-strategist
-    directive: |
-      Pick ONE blog topic for this run. Read business-context.yaml for the
-      business niche, content pillars, and competitor list.
-
-      First check run input. If preferred_topic exists, treat this as a
-      news-triggered run:
-      - Validate that the event is still timely and relevant to the business.
-      - Use event_date, urgency_reason, source_urls, and preferred_pillar from
-        input when building the brief.
-      - If the event is no longer material, emit skip with reason
-        "news_event_stale".
-      - Do not replace it with broad keyword discovery unless the event is stale.
-
-      If no preferred_topic exists, then:
-
-      1. Analyze Search Console for striking-distance keywords
-      2. Scan market/industry data for timely news
-      3. Check competitor blogs for content gaps
-      4. Mine Reddit/forums for real questions in this niche
-
-      For generic selection, select the highest-priority topic considering:
-      time-sensitive content first, then striking-distance keywords,
-      then content gaps, then pillar balance.
-
-      If this run was triggered with a schedule input specifying a
-      preferred_pillar, weight topics in that pillar higher.
-
-      Output: a single topic brief with target keyword, content pillar,
-      word count target, unique angle, data sources needed, and internal
-      link targets.
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: phase_result
-      required_fields:
-      - topic_brief
-      fields:
-        topic_brief:
-          type: object
-          description: Single topic brief selected for this run
-        target_keyword:
-          type: string
-          description: Primary SEO target keyword
-        content_pillar:
-          type: string
-          description: Which pillar this topic belongs to
   research-collection:
     mode: agent
     agent: content-researcher
@@ -668,359 +540,6 @@ phases:
       - HEAD
       cwd_mode: task_root
       timeout_secs: 60
-  performance-analysis:
-    mode: agent
-    agent: performance-analyst
-    directive: |
-      Generate the content performance report. Pull Search Console
-      data for all published posts, analyze ranking changes, identify
-      the single most impactful post to refresh (declining traffic,
-      competitor overtook us, or ranking for keywords it doesn't
-      cover well). Check LLM citation status via Perplexity.
-
-      If no post needs refresh, set verdict to skip.
-      If a post needs refresh, output the post path and refresh plan.
-
-      Also: if keyword gaps are found (topics with zero coverage),
-      create tasks via animus_task_create for future blog-production runs.
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: phase_result
-      required_fields:
-      - report
-      fields:
-        report:
-          type: object
-          description: Performance report with metrics and recommendations
-        refresh_target:
-          type: string
-          description: File path of the post to refresh, or null if none needed
-    decision_contract:
-      min_confidence: 0.5
-      max_risk: low
-      allow_missing_decision: false
-  content-refresh-write:
-    mode: agent
-    agent: content-refresher
-    directive: |
-      Refresh the post identified in the prior phase. Update statistics,
-      prices, rates, and time-sensitive claims with current data from
-      Firecrawl scrapes. If a competitor outranks us, analyze their
-      improvements via Firecrawl and incorporate them while maintaining
-      our unique angle. Update dateModified in frontmatter. Commit changes.
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: implementation_result
-      required_fields:
-      - commit_message
-      fields:
-        sections_updated:
-          type: array
-          description: Which sections were refreshed
-          items:
-            type: string
-  refresh-seo-review:
-    mode: agent
-    agent: seo-optimizer
-    directive: |
-      Re-audit the refreshed post. Fix any issues inline and commit:
-      - Verify updated data is present
-      - Keyword positioning maintained
-      - dateModified updated in frontmatter
-      - All standard SEO checks pass (see system prompt)
-      Edit and commit fixes directly.
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: implementation_result
-      required_fields:
-      - commit_message
-  image-regen:
-    mode: agent
-    agent: asset-generator
-    directive: |
-      Regenerate the featured image for an existing blog post using Nano Banana Pro.
-
-      1. Read the blog post from content/<slug>.md (the slug is in the task description)
-      2. Read business-context.yaml for the business niche and aesthetic
-      3. Craft a detailed image prompt based on the post content (follow the
-         IMAGE RULES in your system prompt).
-      4. Call create_models_predictions with model_owner="google",
-         model_name="nano-banana-pro", input={ prompt: "...", aspect_ratio: "16:9" }
-      5. Poll get_predictions until status is "succeeded"
-      6. Download the output image to a temporary path. Detect the actual image
-         format, convert to WebP if needed, verify MIME type is image/webp,
-         verify nonzero dimensions and approximately 16:9 aspect ratio, then
-         save to assets/<slug>.webp (overwrite existing).
-      7. Update the post frontmatter featuredImage field if needed, only after
-         validation passes.
-      8. Commit with descriptive message
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: implementation_result
-      required_fields:
-      - commit_message
-  image-push:
-    mode: command
-    directive: Push the branch with updated image
-    command:
-      program: git
-      args:
-      - push
-      - -u
-      - origin
-      - HEAD
-      cwd_mode: task_root
-      timeout_secs: 60
-  news-scan:
-    mode: agent
-    agent: content-strategist
-    directive: |
-      Scan for breaking news relevant to the business niche.
-      Read business-context.yaml for the industry, location, and
-      topics to monitor. Check via Brave/Exa for:
-      industry regulatory changes, major market moves, policy changes,
-      new developments, and other material events.
-
-      If a material event is detected:
-      1. Create a task via animus_task_create with type=feature, priority=high.
-         Include the event summary, event_date, urgency_reason, source URLs,
-         and suggested pillar in the task body.
-      2. Enqueue it via animus_queue_enqueue with workflow_ref="blog-production"
-         and input_json:
-         {
-           "preferred_topic": "<event-specific blog angle>",
-           "event_date": "<ISO8601 or YYYY-MM-DD>",
-           "urgency_reason": "<why this needs prompt coverage>",
-           "source_urls": ["<authoritative source URL>", "..."],
-           "preferred_pillar": "<content pillar>"
-         }
-
-      If nothing material, emit a skip verdict. Do NOT create tasks
-      for routine activity.
-    capabilities:
-      mutates_state: true
-    decision_contract:
-      min_confidence: 0.5
-      max_risk: low
-      allow_missing_decision: false
-  approval-watcher:
-    mode: agent
-    agent: approval-watcher
-    directive: |
-      Step 1 — Read seen set
-      mkdir -p .animus/state
-      Read .animus/state/approval-seen.json. If missing, treat as
-      {"issues":[], "updated_at":null}. Each entry is:
-      { "subject_id": "...", "status": "...", "approval_key": "...",
-        "transition_ts": "...", "enqueued_at": "ISO8601" }.
-      For non-in-progress observations, approval_key and enqueued_at may be null.
-
-      Step 2 — List Linear-backed subjects
-      Prefer listing all subjects scoped to LINEAR_DISCOVERY_PROJECT_ID so you
-      can observe subjects leaving and re-entering in-progress. If the backend
-      requires status-specific queries, query ready, in-progress, blocked, done,
-      and cancelled separately. Capture per subject: subject_id, title, body,
-      project_id, status, and a true status-transition timestamp if the backend
-      exposes one (state_updated_at / stateUpdatedAt / equivalent).
-
-      Step 3 — Post-filter by project
-      Keep only subjects where project_id == LINEAR_DISCOVERY_PROJECT_ID
-      (skip if the backend already scopes by config.project_id).
-
-      Step 4 — Diff approvals
-      Only subjects with status == in-progress are enqueue candidates.
-
-      Build approval_key as:
-        - "subject:<id>:transition:<transition_ts>" when a true status-transition
-          timestamp exists.
-        - Otherwise "subject:<id>:status:in-progress".
-
-      Do NOT use generic updated_at/comment timestamps as approval triggers.
-      They can change when comments or metadata change and would create
-      duplicate dispatches.
-
-      Enqueue when:
-        - No seen entry has the same approval_key.
-        - OR a true transition timestamp exists and it is newer than the seen
-          in-progress transition for that subject.
-        - OR no transition timestamp exists, but the last seen status for that
-          subject was not in-progress.
-
-      Skip when a seen entry already has the same approval_key and status
-      in-progress.
-
-      Step 5 — Dispatch each enqueue-eligible subject
-      The wrapper is a LOCAL blogtask subject (sqlite, create-capable) — a
-      reference-only dispatch log. Store ONLY linear_subject_id; NEVER read the
-      wrapper's status (Linear is the single source of truth).
-        TASK_ID=$(animus subject create --kind blogtask \
-          --title "Blog: <subject title>" \
-          --body "Wraps Linear subject <subject_id> for blog-from-ticket" \
-          --status ready --json | jq -r '.data.id')
-        animus queue enqueue --task-id "$TASK_ID" \
-          --workflow-ref blog-from-ticket \
-          --input-json "{\"linear_subject_id\":\"<subject_id>\"}"
-      (If --task-id rejects the blogtask kind, fall back to ad-hoc:
-        animus queue enqueue --title "Blog: <subject title>" \
-          --description "Linear subject: <subject_id>" \
-          --workflow-ref blog-from-ticket \
-          --input-json "{\"linear_subject_id\":\"<subject_id>\"}")
-
-      Step 6 — Update seen set atomically (tmpfile + rename)
-      Only after enqueue succeeds, overwrite/append:
-      { subject_id, status: "in-progress", approval_key, transition_ts,
-        enqueued_at: now }.
-      Also update the latest observed status for non-in-progress subjects so a
-      later return to in-progress can be treated as a new approval episode when
-      no true transition timestamp is available. Set updated_at = now.
-
-      Step 7 — Verdict
-      Nothing newly approved → skip (reason "no_approvals"). Else emit the
-      enqueued list.
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: phase_result
-      required_fields:
-      - enqueued
-      fields:
-        enqueued:
-          type: array
-    decision_contract:
-      min_confidence: 0.5
-      max_risk: low
-      allow_missing_decision: true
-  ticket-acknowledge:
-    mode: agent
-    agent: linear-coordinator
-    directive: |
-      Mode: acknowledge.
-      Input: linear_subject_id (from --input-json of the queue dispatch).
-
-      Step 1 — Cancellation guard
-      animus subject get --kind issue --id <linear_subject_id> --json
-      If status != "in-progress", emit FAIL with reason
-      "subject_no_longer_in-progress". Post no comment. (Handles a human
-      cancelling post-approval, before the run starts.)
-
-      Step 2 — Post start comment (Linear via the plugin's comment method).
-      Build JSON params safely with jq -n or an equivalent structured encoder;
-      do not interpolate dynamic text directly into JSON:
-        COMMENT="Blog generation started. Run: <run_id>  Branch: <branch>"
-        PARAMS=$(jq -n \
-          --arg id "<linear_subject_id>" \
-          --arg comment "$COMMENT" \
-          '{id:$id, patch:{comment:$comment}}')
-        animus plugin call --name animus-subject-linear --method subject/update \
-          --params "$PARAMS"
-      Read run_id from runtime context; branch from `git rev-parse --abbrev-ref HEAD`.
-
-      Step 3 — Pass through
-      Output linear_subject_id for downstream phases. Do NOT transition status
-      (the human already moved it to in-progress).
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: phase_result
-      required_fields:
-      - linear_subject_id
-      fields:
-        linear_subject_id:
-          type: string
-  ticket-to-brief:
-    mode: agent
-    agent: content-strategist
-    directive: |
-      Convert an approved Linear-backed subject into a topic_brief.
-      Input: linear_subject_id (threaded from ticket-acknowledge).
-
-      Step 1 — Re-fetch the subject (mandatory)
-      animus subject get --kind issue --id <linear_subject_id> --json
-      Capture: title, body, status, comments.
-
-      Step 2 — Cancellation guard
-      If status != "in-progress", emit FAIL with reason
-      "subject_no_longer_in-progress" (defense in depth — human may have
-      cancelled between phases).
-
-      Read business-context.yaml. Read content/manifest.json.
-
-      Step 3 — Parse the body sections (humans may have edited them):
-        - suggested_pillar (## Suggested pillar)
-        - suggested_keyword (## Suggested target keyword, first quoted string)
-        - pre_identified_sources (## Pre-identified citable sources)
-        - source_transcript_id (## Source)
-
-      Step 4 — Refine keyword via Search Console; prefer a better-shaped variant.
-
-      Step 5 — Build topic_brief (same shape topic-research produces):
-        target_keyword, content_pillar, word_count_target (1200-2500),
-        unique_angle (incl. transcript context), data_sources_needed (start
-        from pre_identified_sources), internal_link_targets (content-library +
-        manifest; 2-3 slugs), linear_subject_id + source_transcript_id (pass
-        through), slug_hint (kebab-case from title).
-
-      Do NOT do deep external research here.
-    capabilities:
-      mutates_state: false
-    output_contract:
-      kind: phase_result
-      required_fields:
-      - topic_brief
-      fields:
-        topic_brief:
-          type: object
-        target_keyword:
-          type: string
-        content_pillar:
-          type: string
-        linear_subject_id:
-          type: string
-        source_transcript_id:
-          type: string
-        slug_hint:
-          type: string
-  linear-finalize:
-    mode: agent
-    agent: linear-coordinator
-    directive: |
-      Mode: finalize.
-      Inputs: linear_subject_id (threaded), slug (from seo-review), branch
-      (`git rev-parse --abbrev-ref HEAD`), commit_message (from register-post).
-
-      Read content/<slug>.md frontmatter for title + meta_description, and the
-      content/manifest.json entry for this slug.
-
-      Step 1 — Post completion comment.
-      Build JSON params safely with jq -n or an equivalent structured encoder;
-      titles and meta descriptions may contain quotes or newlines:
-        COMMENT="Blog draft ready for review. Title: <title>  Slug: <slug>  Words: <word_count>  Branch: <branch>  Meta: <meta_description>  Image: assets/<slug>.webp"
-        PARAMS=$(jq -n \
-          --arg id "<linear_subject_id>" \
-          --arg comment "$COMMENT" \
-          '{id:$id, patch:{comment:$comment}}')
-        animus plugin call --name animus-subject-linear --method subject/update \
-          --params "$PARAMS"
-
-      Step 2 — Optional status transition
-      If LINEAR_FINALIZE_TRANSITION == "done":
-        animus subject update --kind issue --id <linear_subject_id> --status done
-      Else leave status alone (human moves to their team's In Review state).
-    capabilities:
-      mutates_state: true
-    output_contract:
-      kind: phase_result
-      required_fields:
-      - linear_subject_id
-      fields:
-        linear_subject_id:
-          type: string
-        comment_id:
-          type: string
   register-post:
     mode: agent
     agent: register-post-runner
@@ -1052,94 +571,3 @@ phases:
           type: string
         linear_subject_id:
           type: string
-workflows:
-- id: blog-production
-  name: Blog Post Production
-  description: Discover topic, research, write, optimize, generate assets
-  phases:
-  - topic-research
-  - research-collection
-  - content-writing
-  - commit-draft
-  - seo-review
-  - asset-generation
-  - social-excerpts
-  - register-post
-  - push-branch
-- id: refresh-cycle
-  name: Refresh Cycle
-  description: Analyze performance, refresh declining post, re-optimize
-  phases:
-  - performance-analysis
-  - content-refresh-write
-  - refresh-seo-review
-  - push-branch
-- id: image-refresh
-  name: Image Refresh
-  description: Regenerate featured image for an existing blog post
-  phases:
-  - image-regen
-  - image-push
-- id: news-monitor
-  name: Industry News Monitor
-  description: Daily scan for breaking news, enqueues blog-production if material
-  phases:
-  - news-scan
-- id: idea-discovery
-  name: Transcript-Driven Idea Discovery
-  description: Poll Krisp transcripts and propose blog ideas as Linear-backed subjects
-  phases:
-  - transcript-fetch
-  - idea-strategist
-- id: approval-watch
-  name: Linear Approval Watcher
-  description: Poll Linear-backed subjects for in-progress status and dispatch blog-from-ticket
-  phases:
-  - approval-watcher
-- id: blog-from-ticket
-  name: Blog Generation from Approved Linear Subject
-  description: Generate a blog post from a human-approved Linear discovery subject
-  phases:
-  - ticket-acknowledge
-  - ticket-to-brief
-  - research-collection
-  - content-writing
-  - commit-draft
-  - seo-review
-  - asset-generation
-  - social-excerpts
-  - register-post
-  - push-branch
-  - linear-finalize
-schedules:
-- id: blog-primary
-  cron: 0 8 * * 2
-  workflow_ref: blog-production
-  enabled: true
-  input:
-    preferred_pillar: ''
-- id: blog-secondary
-  cron: 0 8 * * 4
-  workflow_ref: blog-production
-  enabled: true
-  input:
-    preferred_pillar: ''
-- id: refresh
-  cron: 0 8 * * 3
-  workflow_ref: refresh-cycle
-  enabled: true
-- id: news
-  cron: 0 6 * * *
-  workflow_ref: news-monitor
-  enabled: true
-- id: discovery
-  cron: "0 7 * * *"
-  workflow_ref: idea-discovery
-  # Disabled until Krisp + Linear secrets are configured in .env (placeholders
-  # are in .env.example). Flip to true once the backend is live.
-  enabled: false
-- id: approval-watch
-  cron: "*/15 * * * *"
-  workflow_ref: approval-watch
-  # Disabled until Linear secrets are configured. Flip to true with discovery.
-  enabled: false

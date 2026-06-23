@@ -1,0 +1,47 @@
+# image-refresh — regenerate the featured image for an existing post.
+phases:
+  image-regen:
+    mode: agent
+    agent: asset-generator
+    directive: |
+      Regenerate the featured image for an existing blog post using Nano Banana Pro.
+
+      1. Read the blog post from content/<slug>.md (the slug is in the task description)
+      2. Read business-context.yaml for the business niche and aesthetic
+      3. Craft a detailed image prompt based on the post content (follow the
+         IMAGE RULES in your system prompt).
+      4. Call create_models_predictions with model_owner="google",
+         model_name="nano-banana-pro", input={ prompt: "...", aspect_ratio: "16:9" }
+      5. Poll get_predictions until status is "succeeded"
+      6. Download the output image to a temporary path. Detect the actual image
+         format, convert to WebP if needed, verify MIME type is image/webp,
+         verify nonzero dimensions and approximately 16:9 aspect ratio, then
+         save to assets/<slug>.webp (overwrite existing).
+      7. Update the post frontmatter featuredImage field if needed, only after
+         validation passes.
+      8. Commit with descriptive message
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: implementation_result
+      required_fields:
+      - commit_message
+  image-push:
+    mode: command
+    directive: Push the branch with updated image
+    command:
+      program: git
+      args:
+      - push
+      - -u
+      - origin
+      - HEAD
+      cwd_mode: task_root
+      timeout_secs: 60
+workflows:
+- id: image-refresh
+  name: Image Refresh
+  description: Regenerate featured image for an existing blog post
+  phases:
+  - image-regen
+  - image-push

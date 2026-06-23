@@ -41,9 +41,9 @@ The blog generator ships with **11 MCP servers** that give agents access to sear
 | Server | Package | What It Does |
 |--------|---------|--------------|
 | **Krisp** | (in workflow YAML) | Audio transcript ingest — source for the idea-discovery pipeline |
-| **Content Library** | (in workflow YAML) | Org-wide content + artifact database — dedup + internal-link selection |
+| **Content Library** | (in workflow YAML, BYO) | Org "knowledge brain" — deep drafting context (prior research, established facts, brand positions, angles already used) so agents write unique, high-quality content; also dedup + internal-link slugs. Bring your own content MCP. |
 
-> Both ship as TODO stubs (`command: "true"`) until configured. Krisp may stay stubbed (discovery no-ops); content-library is a hard precondition for the blog-from-ticket generation half.
+> Both ship as no-op stubs (`command: "true"`, macOS). Krisp gates the discovery half. **content-library is a bring-your-own extension point** — wire your own content MCP to give agents a knowledge brain. Until then it is a no-op stub and every agent that uses it falls back to `content/manifest.json` + research (the prompts say "do not block"), so the pipeline runs without it.
 
 ## Subject Backends
 
@@ -61,12 +61,12 @@ One-time install: `animus plugin install launchapp-dev/animus-subject-linear`
 
 ```
 Strategist           → animus, exa, tavily, brave, firecrawl, search-console, content-library
-Researcher           → firecrawl, exa, tavily, brave, google-maps
+Researcher           → firecrawl, exa, tavily, brave, google-maps, content-library
 Writer               → content-library
 SEO Optimizer        → search-console, firecrawl, content-library
 Asset Generator      → replicate
 Performance Analyst  → animus, search-console, exa, perplexity
-Content Refresher    → firecrawl
+Content Refresher    → firecrawl, content-library
 Transcript Collector → krisp
 Idea Strategist      → animus, content-library, search-console, exa, tavily, brave, firecrawl
 Approval Watcher     → animus

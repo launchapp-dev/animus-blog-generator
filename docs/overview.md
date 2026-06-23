@@ -18,7 +18,7 @@ Runs on a schedule (2x/week publishing, weekly refresh, daily news scan) with ze
 
 **Most AI blog tools are single-shot** — paste a topic, get a generic post. This is a multi-agent pipeline where 7 specialized agents each handle what they're best at. The strategist picks topics differently than the writer writes, and the SEO optimizer catches things the writer misses.
 
-**Research-first, not vibes-first.** Agents scrape real sources (Firecrawl, Exa, Brave, Google Maps, Search Console) before writing a single word. Every claim gets a citation. No "studies show" without the actual study.
+**Research-first, not vibes-first.** Agents scrape real sources (Firecrawl, Exa, Brave, Google Maps, Search Console) before writing a single word. Every claim gets a citation. No "studies show" without the actual study. Optionally plug in your own content "knowledge brain" (a bring-your-own content MCP) to ground every draft in your org's accumulated context — prior research, established facts, angles already used — so posts stay unique and never repeat themselves.
 
 **AI SEO is built in.** Most tools optimize for Google circa 2020. This pipeline structures content to get *cited* by AI systems — extractable chunks, attributed statistics, Q&A sections, schema markup. That's the game now.
 

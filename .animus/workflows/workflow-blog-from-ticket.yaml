@@ -1,0 +1,146 @@
+# blog-from-ticket — generate a post from a human-approved Linear issue.
+# Reuses the shared content pipeline from custom.yaml.
+phases:
+  ticket-acknowledge:
+    mode: agent
+    agent: linear-coordinator
+    directive: |
+      Mode: acknowledge.
+      Input: linear_subject_id (from --input-json of the queue dispatch).
+
+      Step 1 — Cancellation guard
+      animus subject get --kind issue --id <linear_subject_id> --json
+      If status != "in-progress", emit FAIL with reason
+      "subject_no_longer_in-progress". Post no comment. (Handles a human
+      cancelling post-approval, before the run starts.)
+
+      Step 2 — Post start comment (Linear via the plugin's comment method).
+      Build JSON params safely with jq -n or an equivalent structured encoder;
+      do not interpolate dynamic text directly into JSON:
+        COMMENT="Blog generation started. Run: <run_id>  Branch: <branch>"
+        PARAMS=$(jq -n \
+          --arg id "<linear_subject_id>" \
+          --arg comment "$COMMENT" \
+          '{id:$id, patch:{comment:$comment}}')
+        animus plugin call --name animus-subject-linear --method subject/update \
+          --params "$PARAMS"
+      Read run_id from runtime context; branch from `git rev-parse --abbrev-ref HEAD`.
+
+      Step 3 — Pass through
+      Output linear_subject_id for downstream phases. Do NOT transition status
+      (the human already moved it to in-progress).
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - linear_subject_id
+      fields:
+        linear_subject_id:
+          type: string
+  ticket-to-brief:
+    mode: agent
+    agent: content-strategist
+    directive: |
+      Convert an approved Linear-backed subject into a topic_brief.
+      Input: linear_subject_id (threaded from ticket-acknowledge).
+
+      Step 1 — Re-fetch the subject (mandatory)
+      animus subject get --kind issue --id <linear_subject_id> --json
+      Capture: title, body, status, comments.
+
+      Step 2 — Cancellation guard
+      If status != "in-progress", emit FAIL with reason
+      "subject_no_longer_in-progress" (defense in depth — human may have
+      cancelled between phases).
+
+      Read business-context.yaml. Read content/manifest.json.
+
+      Step 3 — Parse the body sections (humans may have edited them):
+        - suggested_pillar (## Suggested pillar)
+        - suggested_keyword (## Suggested target keyword, first quoted string)
+        - pre_identified_sources (## Pre-identified citable sources)
+        - source_transcript_id (## Source)
+
+      Step 4 — Refine keyword via Search Console; prefer a better-shaped variant.
+
+      Step 5 — Build topic_brief (same shape topic-research produces):
+        target_keyword, content_pillar, word_count_target (1200-2500),
+        unique_angle (incl. transcript context), data_sources_needed (start
+        from pre_identified_sources), internal_link_targets (content-library +
+        manifest; 2-3 slugs), linear_subject_id + source_transcript_id (pass
+        through), slug_hint (kebab-case from title).
+
+      Do NOT do deep external research here.
+    capabilities:
+      mutates_state: false
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - topic_brief
+      fields:
+        topic_brief:
+          type: object
+        target_keyword:
+          type: string
+        content_pillar:
+          type: string
+        linear_subject_id:
+          type: string
+        source_transcript_id:
+          type: string
+        slug_hint:
+          type: string
+  linear-finalize:
+    mode: agent
+    agent: linear-coordinator
+    directive: |
+      Mode: finalize.
+      Inputs: linear_subject_id (threaded), slug (from seo-review), branch
+      (`git rev-parse --abbrev-ref HEAD`), commit_message (from register-post).
+
+      Read content/<slug>.md frontmatter for title + meta_description, and the
+      content/manifest.json entry for this slug.
+
+      Step 1 — Post completion comment.
+      Build JSON params safely with jq -n or an equivalent structured encoder;
+      titles and meta descriptions may contain quotes or newlines:
+        COMMENT="Blog draft ready for review. Title: <title>  Slug: <slug>  Words: <word_count>  Branch: <branch>  Meta: <meta_description>  Image: assets/<slug>.webp"
+        PARAMS=$(jq -n \
+          --arg id "<linear_subject_id>" \
+          --arg comment "$COMMENT" \
+          '{id:$id, patch:{comment:$comment}}')
+        animus plugin call --name animus-subject-linear --method subject/update \
+          --params "$PARAMS"
+
+      Step 2 — Optional status transition
+      If LINEAR_FINALIZE_TRANSITION == "done":
+        animus subject update --kind issue --id <linear_subject_id> --status done
+      Else leave status alone (human moves to their team's In Review state).
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - linear_subject_id
+      fields:
+        linear_subject_id:
+          type: string
+        comment_id:
+          type: string
+workflows:
+- id: blog-from-ticket
+  name: Blog Generation from Approved Linear Subject
+  description: Generate a blog post from a human-approved Linear discovery subject
+  phases:
+  - ticket-acknowledge
+  - ticket-to-brief
+  - research-collection
+  - content-writing
+  - commit-draft
+  - seo-review
+  - asset-generation
+  - social-excerpts
+  - register-post
+  - push-branch
+  - linear-finalize

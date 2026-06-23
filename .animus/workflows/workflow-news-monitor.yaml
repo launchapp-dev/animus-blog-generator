@@ -1,0 +1,45 @@
+# news-monitor — daily scan; enqueues blog-production on a material event.
+phases:
+  news-scan:
+    mode: agent
+    agent: content-strategist
+    directive: |
+      Scan for breaking news relevant to the business niche.
+      Read business-context.yaml for the industry, location, and
+      topics to monitor. Check via Brave/Exa for:
+      industry regulatory changes, major market moves, policy changes,
+      new developments, and other material events.
+
+      If a material event is detected:
+      1. Create a task via animus_task_create with type=feature, priority=high.
+         Include the event summary, event_date, urgency_reason, source URLs,
+         and suggested pillar in the task body.
+      2. Enqueue it via animus_queue_enqueue with workflow_ref="blog-production"
+         and input_json:
+         {
+           "preferred_topic": "<event-specific blog angle>",
+           "event_date": "<ISO8601 or YYYY-MM-DD>",
+           "urgency_reason": "<why this needs prompt coverage>",
+           "source_urls": ["<authoritative source URL>", "..."],
+           "preferred_pillar": "<content pillar>"
+         }
+
+      If nothing material, emit a skip verdict. Do NOT create tasks
+      for routine activity.
+    capabilities:
+      mutates_state: true
+    decision_contract:
+      min_confidence: 0.5
+      max_risk: low
+      allow_missing_decision: false
+workflows:
+- id: news-monitor
+  name: Industry News Monitor
+  description: Daily scan for breaking news, enqueues blog-production if material
+  phases:
+  - news-scan
+schedules:
+- id: news
+  cron: 0 6 * * *
+  workflow_ref: news-monitor
+  enabled: false

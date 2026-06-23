@@ -1,0 +1,82 @@
+# blog-production — scheduled push pipeline. Unique phase: topic-research.
+# Shared content-pipeline phases + agents live in custom.yaml.
+phases:
+  topic-research:
+    mode: agent
+    agent: content-strategist
+    directive: |
+      Pick ONE blog topic for this run. Read business-context.yaml for the
+      business niche, content pillars, and competitor list.
+
+      First check run input. If preferred_topic exists, treat this as a
+      news-triggered run:
+      - Validate that the event is still timely and relevant to the business.
+      - Use event_date, urgency_reason, source_urls, and preferred_pillar from
+        input when building the brief.
+      - If the event is no longer material, emit skip with reason
+        "news_event_stale".
+      - Do not replace it with broad keyword discovery unless the event is stale.
+
+      If no preferred_topic exists, then:
+
+      1. Analyze Search Console for striking-distance keywords
+      2. Scan market/industry data for timely news
+      3. Check competitor blogs for content gaps
+      4. Mine Reddit/forums for real questions in this niche
+
+      For generic selection, select the highest-priority topic considering:
+      time-sensitive content first, then striking-distance keywords,
+      then content gaps, then pillar balance.
+
+      If this run was triggered with a schedule input specifying a
+      preferred_pillar, weight topics in that pillar higher.
+
+      Output: a single topic brief with target keyword, content pillar,
+      word count target, unique angle, data sources needed, and internal
+      link targets.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - topic_brief
+      fields:
+        topic_brief:
+          type: object
+          description: Single topic brief selected for this run
+        target_keyword:
+          type: string
+          description: Primary SEO target keyword
+        content_pillar:
+          type: string
+          description: Which pillar this topic belongs to
+workflows:
+- id: blog-production
+  name: Blog Post Production
+  description: Discover topic, research, write, optimize, generate assets
+  phases:
+  - topic-research
+  - research-collection
+  - content-writing
+  - commit-draft
+  - seo-review
+  - asset-generation
+  - social-excerpts
+  - register-post
+  - push-branch
+schedules:
+# Content schedules ship DISABLED on a fresh clone: they call external MCPs
+# (search-console, exa, firecrawl, replicate, ...) that need real keys in the
+# daemon's shell. Flip to true once .env is populated. See docs/reviews/.
+- id: blog-primary
+  cron: 0 8 * * 2
+  workflow_ref: blog-production
+  enabled: false
+  input:
+    preferred_pillar: ''
+- id: blog-secondary
+  cron: 0 8 * * 4
+  workflow_ref: blog-production
+  enabled: false
+  input:
+    preferred_pillar: ''

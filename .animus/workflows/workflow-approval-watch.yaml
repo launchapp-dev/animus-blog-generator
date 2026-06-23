@@ -1,0 +1,101 @@
+# approval-watch — poll Linear for in-progress (approved) issues, dispatch blog-from-ticket.
+phases:
+  approval-watcher:
+    mode: agent
+    agent: approval-watcher
+    directive: |
+      Step 1 — Read seen set
+      mkdir -p .animus/state
+      Read .animus/state/approval-seen.json. If missing, treat as
+      {"issues":[], "updated_at":null}. Each entry is:
+      { "subject_id": "...", "status": "...", "approval_key": "...",
+        "transition_ts": "...", "enqueued_at": "ISO8601" }.
+      For non-in-progress observations, approval_key and enqueued_at may be null.
+
+      Step 2 — List Linear-backed subjects
+      Prefer listing all subjects scoped to LINEAR_DISCOVERY_PROJECT_ID so you
+      can observe subjects leaving and re-entering in-progress. If the backend
+      requires status-specific queries, query ready, in-progress, blocked, done,
+      and cancelled separately. Capture per subject: subject_id, title, body,
+      project_id, status, and a true status-transition timestamp if the backend
+      exposes one (state_updated_at / stateUpdatedAt / equivalent).
+
+      Step 3 — Post-filter by project
+      Keep only subjects where project_id == LINEAR_DISCOVERY_PROJECT_ID
+      (skip if the backend already scopes by config.project_id).
+
+      Step 4 — Diff approvals
+      Only subjects with status == in-progress are enqueue candidates.
+
+      Build approval_key as:
+        - "subject:<id>:transition:<transition_ts>" when a true status-transition
+          timestamp exists.
+        - Otherwise "subject:<id>:status:in-progress".
+
+      Do NOT use generic updated_at/comment timestamps as approval triggers.
+      They can change when comments or metadata change and would create
+      duplicate dispatches.
+
+      Enqueue when:
+        - No seen entry has the same approval_key.
+        - OR a true transition timestamp exists and it is newer than the seen
+          in-progress transition for that subject.
+        - OR no transition timestamp exists, but the last seen status for that
+          subject was not in-progress.
+
+      Skip when a seen entry already has the same approval_key and status
+      in-progress.
+
+      Step 5 — Dispatch each enqueue-eligible subject
+      The wrapper is a LOCAL blogtask subject (sqlite, create-capable) — a
+      reference-only dispatch log. Store ONLY linear_subject_id; NEVER read the
+      wrapper's status (Linear is the single source of truth).
+        TASK_ID=$(animus subject create --kind blogtask \
+          --title "Blog: <subject title>" \
+          --body "Wraps Linear subject <subject_id> for blog-from-ticket" \
+          --status ready --json | jq -r '.data.id')
+        animus queue enqueue --task-id "$TASK_ID" \
+          --workflow-ref blog-from-ticket \
+          --input-json "{\"linear_subject_id\":\"<subject_id>\"}"
+      (If --task-id rejects the blogtask kind, fall back to ad-hoc:
+        animus queue enqueue --title "Blog: <subject title>" \
+          --description "Linear subject: <subject_id>" \
+          --workflow-ref blog-from-ticket \
+          --input-json "{\"linear_subject_id\":\"<subject_id>\"}")
+
+      Step 6 — Update seen set atomically (tmpfile + rename)
+      Only after enqueue succeeds, overwrite/append:
+      { subject_id, status: "in-progress", approval_key, transition_ts,
+        enqueued_at: now }.
+      Also update the latest observed status for non-in-progress subjects so a
+      later return to in-progress can be treated as a new approval episode when
+      no true transition timestamp is available. Set updated_at = now.
+
+      Step 7 — Verdict
+      Nothing newly approved → skip (reason "no_approvals"). Else emit the
+      enqueued list.
+    capabilities:
+      mutates_state: true
+    output_contract:
+      kind: phase_result
+      required_fields:
+      - enqueued
+      fields:
+        enqueued:
+          type: array
+    decision_contract:
+      min_confidence: 0.5
+      max_risk: low
+      allow_missing_decision: true
+workflows:
+- id: approval-watch
+  name: Linear Approval Watcher
+  description: Poll Linear-backed subjects for in-progress status and dispatch blog-from-ticket
+  phases:
+  - approval-watcher
+schedules:
+- id: approval-watch
+  cron: "*/15 * * * *"
+  workflow_ref: approval-watch
+  # Disabled until Linear secrets are configured. Flip to true with discovery.
+  enabled: false
