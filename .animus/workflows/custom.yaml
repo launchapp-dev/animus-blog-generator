@@ -188,7 +188,11 @@ agents:
       - No AI cliche words
       - Readability grade 8-10
 
-      SCHEMA MARKUP: Ensure JSON-LD for Article, LocalBusiness, FAQ sections.
+      SCHEMA MARKUP: This is a markdown/frontmatter pipeline. Update supported
+      frontmatter/schema fields when available. Do not inject raw <script> tags
+      into the article body unless the site's renderer explicitly expects them.
+      If raw JSON-LD is needed but unsupported by the markdown format, emit a
+      schema_recommendation instead.
 
       AI CITABILITY: Content structured as extractable chunks — definitions,
       numbered steps, comparison tables, FAQs, attributed statistics.
@@ -209,7 +213,9 @@ agents:
       IMAGE RULES (asset-generation, image-regen):
       - Style: professional photography relevant to the business niche, natural
         lighting. No text overlays, watermarks, or AI artifacts. 16:9.
-      - Model: google/nano-banana-pro. Save to assets/<slug>.webp.
+      - Model: google/nano-banana-pro. Save to assets/<slug>.webp only after
+        validating the actual file is WebP with nonzero dimensions and a 16:9-ish
+        aspect ratio.
 
       SOCIAL CONTENT RULES (social-excerpts):
       - Instagram: short, emoji-friendly, 5-10 hashtags, hook-first
@@ -290,11 +296,11 @@ agents:
       animus-task-management.
 
       Polling agent. Detects Linear-backed subjects whose Animus status
-      became in_progress (the approval signal) and dispatches blog-from-ticket
+      became in-progress (the approval signal) and dispatches blog-from-ticket
       runs for them.
 
       Filter rules (use exact lowercase values):
-        - Include: status == in_progress
+        - Include: status == in-progress
         - Exclude: status in {cancelled, done, blocked, ready}
 
       Scope every query to LINEAR_DISCOVERY_PROJECT_ID.
@@ -309,8 +315,8 @@ agents:
 
       Manages Linear ticket comments (and optionally status) for
       blog-from-ticket runs. Two modes:
-      - "acknowledge": re-check status; if still in_progress, post a start
-        comment; if not in_progress, abort cleanly.
+      - "acknowledge": re-check status; if still in-progress, post a start
+        comment; if not in-progress, abort cleanly.
       - "finalize": post a rich completion comment; optionally transition
         to done if LINEAR_FINALIZE_TRANSITION=done.
 
@@ -341,9 +347,14 @@ phases:
       chronological order):
         - Fetch full text + metadata (id, created_at, participants,
           duration_secs, title)
+        - If the provider exposes timestamped transcript segments, include
+          segments as:
+          [{ "start":"HH:MM:SS", "end":"HH:MM:SS", "speaker":"...",
+             "text":"..." }]
         - Write to .animus/state/transcripts/<id>.json with:
           { "id":"...", "created_at":"<ISO8601>", "participants":[...],
-            "duration_secs":N, "title":"...", "text":"..." }
+            "duration_secs":N, "title":"...", "text":"...",
+            "segments":[...] }
 
       DO NOT touch .animus/state/discovery-cursor.json. idea-strategist owns it.
 
@@ -379,8 +390,10 @@ phases:
       Step 2 — Per-transcript synthesis
       For each transcript file in transcript_paths IN ORDER:
         a. Read transcript JSON.
-        b. Extract 3-5 candidate blog angles. Each MUST quote a specific
-           transcript moment with timestamp.
+        b. Extract 3-5 candidate blog angles. Each MUST quote an exact
+           transcript excerpt. Use timestamps only from transcript.segments; if
+           segments are missing or do not include timing, set
+           timestamp_available=false and do NOT invent timestamps.
         c. External validation per candidate:
            - Search Console: keyword viability (volume, rank, striking distance)
            - Exa + Tavily + Brave: competitive landscape
@@ -397,7 +410,7 @@ phases:
            iii. Create the subject (CLI flag is --body, NOT --description):
                   animus subject create --kind issue --title "<headline>" \
                     --body "<structured markdown body with sections:
-                      ## Source / Transcript: <id> @ <ts> / Quote: '<quote>'
+                      ## Source / Transcript: <id> / Timestamp: <ts or unavailable> / timestamp_available: <true|false> / Quote: '<quote>'
                       ## Suggested target keyword / '<keyword>' GSC stats
                       ## Competitive landscape / top 3 URLs + gap
                       ## Pre-identified citable sources / 2-3 URLs
@@ -437,14 +450,25 @@ phases:
     agent: content-strategist
     directive: |
       Pick ONE blog topic for this run. Read business-context.yaml for the
-      business niche, content pillars, and competitor list. Then:
+      business niche, content pillars, and competitor list.
+
+      First check run input. If preferred_topic exists, treat this as a
+      news-triggered run:
+      - Validate that the event is still timely and relevant to the business.
+      - Use event_date, urgency_reason, source_urls, and preferred_pillar from
+        input when building the brief.
+      - If the event is no longer material, emit skip with reason
+        "news_event_stale".
+      - Do not replace it with broad keyword discovery unless the event is stale.
+
+      If no preferred_topic exists, then:
 
       1. Analyze Search Console for striking-distance keywords
       2. Scan market/industry data for timely news
       3. Check competitor blogs for content gaps
       4. Mine Reddit/forums for real questions in this niche
 
-      Select the highest-priority topic considering:
+      For generic selection, select the highest-priority topic considering:
       time-sensitive content first, then striking-distance keywords,
       then content gaps, then pillar balance.
 
@@ -556,6 +580,9 @@ phases:
       - Title under 60 characters
       - No AI cliche words
       - Readability: grade 8-10
+      - Schema: update supported frontmatter/schema fields only. If JSON-LD is
+        needed but unsupported by the markdown format, emit schema_recommendation
+        instead of inserting script tags into the article body.
 
       Edit the file directly, then commit with message describing fixes.
 
@@ -583,6 +610,9 @@ phases:
           description: List of fixes applied
           items:
             type: string
+        schema_recommendation:
+          type: string
+          description: Schema guidance when JSON-LD cannot be represented safely in markdown
   asset-generation:
     mode: agent
     agent: asset-generator
@@ -597,8 +627,12 @@ phases:
       4. Call create_models_predictions with model_owner="google",
          model_name="nano-banana-pro", input={ prompt: "...", aspect_ratio: "16:9" }
       5. Poll get_predictions until status is "succeeded"
-      6. Download the output image and save to assets/<slug>.webp
-      7. Update the post frontmatter featuredImage field
+      6. Download the output image to a temporary path. Detect the actual image
+         format, convert to WebP if needed, verify MIME type is image/webp,
+         verify nonzero dimensions and approximately 16:9 aspect ratio, then
+         save to assets/<slug>.webp.
+      7. Update the post frontmatter featuredImage field only after validation
+         passes.
       8. Commit with message
     capabilities:
       mutates_state: true
@@ -716,8 +750,12 @@ phases:
       4. Call create_models_predictions with model_owner="google",
          model_name="nano-banana-pro", input={ prompt: "...", aspect_ratio: "16:9" }
       5. Poll get_predictions until status is "succeeded"
-      6. Download the output image and save to assets/<slug>.webp (overwrite existing)
-      7. Update the post frontmatter featuredImage field if needed
+      6. Download the output image to a temporary path. Detect the actual image
+         format, convert to WebP if needed, verify MIME type is image/webp,
+         verify nonzero dimensions and approximately 16:9 aspect ratio, then
+         save to assets/<slug>.webp (overwrite existing).
+      7. Update the post frontmatter featuredImage field if needed, only after
+         validation passes.
       8. Commit with descriptive message
     capabilities:
       mutates_state: true
@@ -748,8 +786,18 @@ phases:
       new developments, and other material events.
 
       If a material event is detected:
-      1. Create a task via animus_task_create with type=feature, priority=high
+      1. Create a task via animus_task_create with type=feature, priority=high.
+         Include the event summary, event_date, urgency_reason, source URLs,
+         and suggested pillar in the task body.
       2. Enqueue it via animus_queue_enqueue with workflow_ref="blog-production"
+         and input_json:
+         {
+           "preferred_topic": "<event-specific blog angle>",
+           "event_date": "<ISO8601 or YYYY-MM-DD>",
+           "urgency_reason": "<why this needs prompt coverage>",
+           "source_urls": ["<authoritative source URL>", "..."],
+           "preferred_pillar": "<content pillar>"
+         }
 
       If nothing material, emit a skip verdict. Do NOT create tasks
       for routine activity.
@@ -766,24 +814,44 @@ phases:
       Step 1 — Read seen set
       mkdir -p .animus/state
       Read .animus/state/approval-seen.json. If missing, treat as
-      {"issues":[], "updated_at":null}. Each entry is
-      { "subject_id": "...", "last_approved_at": "ISO8601" }.
-      Key by (subject_id, last_approved_at) — NOT subject_id alone — so a
-      re-approval after a failed run is re-enqueued.
+      {"issues":[], "updated_at":null}. Each entry is:
+      { "subject_id": "...", "status": "...", "approval_key": "...",
+        "transition_ts": "...", "enqueued_at": "ISO8601" }.
+      For non-in-progress observations, approval_key and enqueued_at may be null.
 
-      Step 2 — List Linear-backed subjects with status=in_progress
-      animus subject list --kind issue --status in_progress --json
-      Capture per subject: subject_id, title, body, project_id, and the
-      transition timestamp (state_updated_at / stateUpdatedAt / fallback updated_at).
+      Step 2 — List Linear-backed subjects
+      Prefer listing all subjects scoped to LINEAR_DISCOVERY_PROJECT_ID so you
+      can observe subjects leaving and re-entering in-progress. If the backend
+      requires status-specific queries, query ready, in-progress, blocked, done,
+      and cancelled separately. Capture per subject: subject_id, title, body,
+      project_id, status, and a true status-transition timestamp if the backend
+      exposes one (state_updated_at / stateUpdatedAt / equivalent).
 
       Step 3 — Post-filter by project
       Keep only subjects where project_id == LINEAR_DISCOVERY_PROJECT_ID
       (skip if the backend already scopes by config.project_id).
 
-      Step 4 — Diff against seen using (subject_id, transition_ts)
-        - No entry            → new approval     → enqueue.
-        - seen_at <  trans_ts → re-approval      → enqueue + overwrite.
-        - seen_at >= trans_ts → already enqueued → skip.
+      Step 4 — Diff approvals
+      Only subjects with status == in-progress are enqueue candidates.
+
+      Build approval_key as:
+        - "subject:<id>:transition:<transition_ts>" when a true status-transition
+          timestamp exists.
+        - Otherwise "subject:<id>:status:in-progress".
+
+      Do NOT use generic updated_at/comment timestamps as approval triggers.
+      They can change when comments or metadata change and would create
+      duplicate dispatches.
+
+      Enqueue when:
+        - No seen entry has the same approval_key.
+        - OR a true transition timestamp exists and it is newer than the seen
+          in-progress transition for that subject.
+        - OR no transition timestamp exists, but the last seen status for that
+          subject was not in-progress.
+
+      Skip when a seen entry already has the same approval_key and status
+      in-progress.
 
       Step 5 — Dispatch each enqueue-eligible subject
       The wrapper is a LOCAL blogtask subject (sqlite, create-capable) — a
@@ -803,8 +871,12 @@ phases:
           --input-json "{\"linear_subject_id\":\"<subject_id>\"}")
 
       Step 6 — Update seen set atomically (tmpfile + rename)
-      For each enqueued subject: overwrite/append
-      { subject_id, last_approved_at: transition_ts }; set updated_at = now.
+      Only after enqueue succeeds, overwrite/append:
+      { subject_id, status: "in-progress", approval_key, transition_ts,
+        enqueued_at: now }.
+      Also update the latest observed status for non-in-progress subjects so a
+      later return to in-progress can be treated as a new approval episode when
+      no true transition timestamp is available. Set updated_at = now.
 
       Step 7 — Verdict
       Nothing newly approved → skip (reason "no_approvals"). Else emit the
@@ -831,18 +903,25 @@ phases:
 
       Step 1 — Cancellation guard
       animus subject get --kind issue --id <linear_subject_id> --json
-      If status != "in_progress", emit FAIL with reason
-      "subject_no_longer_in_progress". Post no comment. (Handles a human
+      If status != "in-progress", emit FAIL with reason
+      "subject_no_longer_in-progress". Post no comment. (Handles a human
       cancelling post-approval, before the run starts.)
 
-      Step 2 — Post start comment (Linear via the plugin's comment method):
+      Step 2 — Post start comment (Linear via the plugin's comment method).
+      Build JSON params safely with jq -n or an equivalent structured encoder;
+      do not interpolate dynamic text directly into JSON:
+        COMMENT="Blog generation started. Run: <run_id>  Branch: <branch>"
+        PARAMS=$(jq -n \
+          --arg id "<linear_subject_id>" \
+          --arg comment "$COMMENT" \
+          '{id:$id, patch:{comment:$comment}}')
         animus plugin call --name animus-subject-linear --method subject/update \
-          --params '{"id":"<linear_subject_id>","patch":{"comment":"🤖 Blog generation started. Run: <run_id>  Branch: <branch>"}}'
+          --params "$PARAMS"
       Read run_id from runtime context; branch from `git rev-parse --abbrev-ref HEAD`.
 
       Step 3 — Pass through
       Output linear_subject_id for downstream phases. Do NOT transition status
-      (the human already moved it to in_progress).
+      (the human already moved it to in-progress).
     capabilities:
       mutates_state: true
     output_contract:
@@ -864,8 +943,8 @@ phases:
       Capture: title, body, status, comments.
 
       Step 2 — Cancellation guard
-      If status != "in_progress", emit FAIL with reason
-      "subject_no_longer_in_progress" (defense in depth — human may have
+      If status != "in-progress", emit FAIL with reason
+      "subject_no_longer_in-progress" (defense in depth — human may have
       cancelled between phases).
 
       Read business-context.yaml. Read content/manifest.json.
@@ -916,9 +995,16 @@ phases:
       Read content/<slug>.md frontmatter for title + meta_description, and the
       content/manifest.json entry for this slug.
 
-      Step 1 — Post completion comment:
+      Step 1 — Post completion comment.
+      Build JSON params safely with jq -n or an equivalent structured encoder;
+      titles and meta descriptions may contain quotes or newlines:
+        COMMENT="Blog draft ready for review. Title: <title>  Slug: <slug>  Words: <word_count>  Branch: <branch>  Meta: <meta_description>  Image: assets/<slug>.webp"
+        PARAMS=$(jq -n \
+          --arg id "<linear_subject_id>" \
+          --arg comment "$COMMENT" \
+          '{id:$id, patch:{comment:$comment}}')
         animus plugin call --name animus-subject-linear --method subject/update \
-          --params '{"id":"<linear_subject_id>","patch":{"comment":"✅ Blog draft ready for review. Title: <title>  Slug: <slug>  Words: <word_count>  Branch: <branch>  Meta: <meta_description>  Image: assets/<slug>.webp"}}'
+          --params "$PARAMS"
 
       Step 2 — Optional status transition
       If LINEAR_FINALIZE_TRANSITION == "done":
@@ -1007,7 +1093,7 @@ workflows:
   - idea-strategist
 - id: approval-watch
   name: Linear Approval Watcher
-  description: Poll Linear-backed subjects for in_progress status and dispatch blog-from-ticket
+  description: Poll Linear-backed subjects for in-progress status and dispatch blog-from-ticket
   phases:
   - approval-watcher
 - id: blog-from-ticket

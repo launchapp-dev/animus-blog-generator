@@ -150,7 +150,8 @@ Draft exists. Run this in order.
 
 ### Readability Pass
 
-Run `scripts/content_scorer.py` on the draft. Target score: 70+.
+Target readability: US grade 8-10, roughly Flesch Reading Ease 60-70.
+Prioritize clear, direct prose over artificially simplified writing.
 
 Manual checks:
 - Average sentence length: aim for 15-20 words, mix it up
