@@ -1,5 +1,7 @@
 # Discovery Flow — Review History
 
+> **⚠️ Historical (2026-06-25).** The `in_progress` status form referenced here is superseded by hyphenated `in-progress`, and `subject/create` is now available (plugin 0.1.8). See [`2026-06-23-deterministic-approval-watcher.md`](2026-06-23-deterministic-approval-watcher.md).
+
 Companion to `2026-06-05-discovery-flow.md` and `2026-06-05-discovery-flow-design.md`. Each row links a reviewer finding to where it was fixed.
 
 ## Round 1 (P0/P1/P2)

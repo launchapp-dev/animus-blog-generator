@@ -1,5 +1,7 @@
 # Discovery Flow Implementation Plan
 
+> **⚠️ Superseded / historical record (2026-06-25).** Two claims below are now outdated and intentionally NOT retro-edited: (1) status values are hyphenated (`in-progress`), not snake_case (`in_progress`) — verified against `animus-subject-linear` 0.1.8 `subject/schema`; (2) `subject/create` IS available as of plugin 0.1.8 (`supports_create: true`). The approval-watcher design is superseded by [`2026-06-23-deterministic-approval-watcher.md`](2026-06-23-deterministic-approval-watcher.md).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an upstream `idea-discovery → human-review-in-Linear → approval-watch → blog-from-ticket` pipeline targeting **`.animus/workflows/custom.yaml`** (the canonical v0.5.14 workflow path), with Linear integrated as an **Animus subject backend** and `content/manifest.json` as the local post index.

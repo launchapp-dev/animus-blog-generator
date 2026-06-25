@@ -47,7 +47,7 @@ The blog generator ships with **11 MCP servers** that give agents access to sear
 
 ## Subject Backends
 
-Linear is integrated as an **Animus subject backend** (not an MCP server). The `animus-subject-linear` plugin auto-maps Linear's `WorkflowState.type` to Animus's normalized statuses (`ready / in_progress / blocked / done / cancelled`). The local SQLite backend serves a dedicated `blogtask` kind for queue-wrapper dispatch logs (`ANIMUS_SQLITE_KINDS=blogtask`).
+Linear is integrated as an **Animus subject backend** (not an MCP server). The `animus-subject-linear` plugin auto-maps Linear's `WorkflowState.type` to Animus's normalized statuses (`ready / in-progress / blocked / done / cancelled`). The local SQLite backend serves a dedicated `blogtask` kind for queue-wrapper dispatch logs (`ANIMUS_SQLITE_KINDS=blogtask`).
 
 | Backend | Kind | What It Does |
 |---|---|---|

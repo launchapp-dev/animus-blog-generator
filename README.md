@@ -157,7 +157,7 @@ In addition to the cron-driven `blog-production` pipeline, this generator suppor
 
 **Daily 7am — `idea-discovery`.** Polls Krisp for new transcripts. The strategist proposes 3–5 angles per transcript, each pre-validated with Search Console + competitor scan + spot-scraped citable sources. Surviving angles become Linear issues (Animus subjects) at status `ready`.
 
-**Every 15 min — `approval-watch`.** Polls Linear-backed subjects for `status == in_progress` (the human-approval signal) and dispatches each newly-approved subject to `blog-from-ticket` via the queue (carrying `linear_subject_id`). Cancelled/Done/Blocked are filtered out.
+**Every 15 min — `approval-watch`.** Polls Linear-backed subjects for `status == in-progress` (the human-approval signal) and dispatches each newly-approved subject to `blog-from-ticket` via the queue (carrying `linear_subject_id`). Cancelled/Done/Blocked are filtered out.
 
 **Per approved ticket — `blog-from-ticket`.** A variant of blog-production using the Linear ticket as the topic brief. `ticket-acknowledge` and `ticket-to-brief` both re-check the subject's status; if the human cancelled after approval, the run aborts cleanly. `register-post` runs before `push-branch` so the manifest commit ships with the push. The last phase posts a completion comment; status transition is opt-in via `LINEAR_FINALIZE_TRANSITION=done`.
 

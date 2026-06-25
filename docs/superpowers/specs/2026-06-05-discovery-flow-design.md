@@ -1,5 +1,7 @@
 # Discovery Flow — Design Spec
 
+> **⚠️ Superseded / historical record (2026-06-25).** Two claims below are now outdated and intentionally NOT retro-edited: (1) status values are hyphenated (`in-progress`), not snake_case (`in_progress`) — verified against `animus-subject-linear` 0.1.8 `subject/schema`; (2) `subject/create` IS available as of plugin 0.1.8 (`supports_create: true`), so the "no create until v0.2.0" note no longer holds. The approval-watcher design is superseded by [`../plans/2026-06-23-deterministic-approval-watcher.md`](../plans/2026-06-23-deterministic-approval-watcher.md).
+
 **Date:** 2026-06-05 (revised after reviewer P0/P1 findings; v0.5.14)
 **Branch:** `feature/discovery-flow`
 **Author:** Rafal + Claude
