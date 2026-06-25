@@ -163,6 +163,12 @@ In addition to the cron-driven `blog-production` pipeline, this generator suppor
 
 **Authoritative-lifecycle invariant.** Linear is the single source of truth for lifecycle. The local SQLite `blogtask` wrapper is a subordinate, reference-only dispatch log — no phase reads its status; only `linear-finalize` writes back.
 
+### Transcript provider (Krisp or Granola)
+
+Transcripts flow through one provider-neutral MCP alias, `transcript-source`, in `.animus/workflows/custom.yaml`. Exactly one provider is active at a time, declared by `TRANSCRIPT_PROVIDER` and matched by what you wire under that alias. Switching providers is config-only — the collector agent normalizes either provider's tools into the staged transcript contract, and transcript ids are namespaced (`<provider>:<raw_id>`) so they never collide across a switch.
+
+Both **Krisp** and **Granola** ship official remote MCP servers (Streamable HTTP, OAuth — no static API key); Granola also has community local-cache servers for fully non-interactive macOS use. Per-provider endpoints, tool tables, auth/daemon trade-offs, and copy-paste wiring snippets are in **[`docs/integrations/transcript-providers/`](docs/integrations/transcript-providers/README.md)**. Until you wire one, `transcript-source` is a no-op stub and the discovery schedule stays disabled.
+
 ### One-time setup
 
 ```bash
@@ -184,7 +190,7 @@ animus daemon start --autonomous
 
 ### Required `.env` values (placeholders are in `.env.example`)
 
-- `TRANSCRIPT_PROVIDER` (`krisp` or `granola`) + the matching key (`KRISP_API_KEY` *or* `GRANOLA_API_KEY`)
+- `TRANSCRIPT_PROVIDER` (`krisp` or `granola`) — the official MCPs authenticate via OAuth (`animus mcp auth transcript-source`); `KRISP_API_KEY` / `GRANOLA_API_KEY` are only for non-MCP or community paths (see the [transcript-provider docs](docs/integrations/transcript-providers/README.md))
 - `LINEAR_API_TOKEN`, `LINEAR_TEAM_ID`, `LINEAR_DISCOVERY_PROJECT_ID`
 - `CONTENT_LIBRARY_URL`, `CONTENT_LIBRARY_TOKEN`
 - `ANIMUS_SQLITE_KINDS=blogtask`

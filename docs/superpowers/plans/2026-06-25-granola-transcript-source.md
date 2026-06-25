@@ -1,7 +1,7 @@
 # Implementation Plan: Provider-Neutral Transcript Source (Krisp / Granola)
 
 **Date:** 2026-06-25
-**Status:** Ready to implement (Granola MCP wiring gated on a live access spike — see step 0)
+**Status:** Provider-neutral plumbing implemented + released (v0.2.0). Granola access spike **complete** (2026-06-25) — see `docs/integrations/transcript-providers/`. Granola has a usable MCP (official remote OAuth + community local-cache); concrete wiring snippets documented per provider.
 **Verified against:** current `.animus/workflows/custom.yaml`, `workflow-idea-discovery.yaml`, `.env.example`, `README.md`, `MCP-TOOLS.md`.
 
 ## Goal
@@ -71,14 +71,21 @@ stale cross-provider timestamp cutoff.
 
 ## Steps
 
-### 0. Spike Granola access (do this before any Granola wiring)
+### 0. Spike Granola access — ✅ DONE (2026-06-25)
 
-Confirm Granola exposes a callable transcript **list + fetch** interface an
-agent can drive (MCP server, or an API an MCP wrapper can front). Capture the
-tool names + response shapes. If there is no usable programmatic access, stop:
-the rename below still ships (provider-neutral plumbing), but Granola stays a
-documented BYO slot exactly like Krisp is today. **This plan does not fabricate
-a Granola MCP** — that wiring lands only after the spike succeeds.
+Granola **does** expose a usable callable transcript list + fetch interface:
+- **Official remote MCP** `https://mcp.granola.ai/mcp` (Streamable HTTP, browser
+  OAuth, no service-account key; `list_meetings` + `get_meeting_transcript`,
+  transcript fetch is **paid-plan only**).
+- **Community local-cache MCPs** (stdio, macOS) that reuse the desktop app's
+  creds — fully non-interactive, unofficial, coupled to Granola's cache format.
+
+Full findings, tool tables, auth/daemon trade-offs, and concrete wiring snippets
+for **both Krisp and Granola** are documented in
+`docs/integrations/transcript-providers/` (`README.md`, `krisp.md`,
+`granola.md`). Krisp is likewise an official remote OAuth MCP
+(`https://mcp.krisp.ai/mcp`). Wiring either provider is config-only against the
+existing `transcript-source` alias.
 
 ### 1. Rename the MCP boundary to `transcript-source` (`custom.yaml`)
 
