@@ -3,6 +3,7 @@
   **Date:** 2026-06-23
   **Status:** Ready to implement (gated on a live-Linear smoke test before enabling the schedule)
   **Revision:** rev. 2 — incorporates external review: two-phase state write, fail-closed project scoping, list pagination, `--task-id` enqueue-rejection fallback, fail-closed on unknown state version, required live-doc fixes.
+**Revision:** rev. 3 — smoke test mirrors the script's fetch (`--limit 500 --json` + truncation check); the ad-hoc enqueue fallback is envelope-aware (`--json` + `.ok`).
   **Verified against:** Animus CLI `0.5.21`, `animus-subject-linear` `0.1.8`.
 
   ## Goal
@@ -215,10 +216,11 @@
                                           → ad-hoc enqueue (below).
           - any other q.error            → enqueue failure (do NOT update state).
         else (create failed — e.g. ANIMUS_SQLITE_KINDS unset):
-          ad-hoc enqueue:
-            animus queue enqueue --title "Blog: $title" \
+          ad-hoc enqueue (envelope-aware — mirror the task-id path):
+            q=$(animus queue enqueue --title "Blog: $title" \
               --description "Linear subject: $id" \
-              --workflow-ref blog-from-ticket --input-json "$input"
+              --workflow-ref blog-from-ticket --input-json "$input" --json)
+            - q.ok → success;  else → enqueue failure (do NOT update state).
         - On ANY enqueue failure (including the ad-hoc path): do NOT update state
           for this subject; record the failure; exit nonzero at end. (Never retry
           ad-hoc after a non-rejection error — only after a clean kind rejection —
@@ -303,9 +305,12 @@
   `LINEAR_API_TOKEN`, `LINEAR_DISCOVERY_PROJECT_ID`, `ANIMUS_SQLITE_KINDS=blogtask`
   in the daemon's shell and the daemon running:
 
-  1. `animus subject list --kind issue --json` — confirm the real envelope: that
-    `.data[]` items expose `status` as `in-progress`, whether `project_id` is
-    present, and whether any `*_updated_at` transition field exists.
+  1. `animus subject list --kind issue --limit 500 --json` (mirror the script's
+    fetch) — confirm the real envelope: that `.data[]` items expose `status` as
+    `in-progress`, whether `project_id` is present, and whether any
+    `*_updated_at` transition field exists. Also check `.data | length`: if it
+    equals the limit, the result is capped — resolve/confirm the pagination
+    cursor and add a follow-up loop before enabling.
   2. Move one test Linear issue to In Progress; run `scripts/approval-watch.sh`
     manually once → confirm exactly one `blog-from-ticket` dispatch.
   3. Run it again immediately → confirm **no** second dispatch (idempotent).
