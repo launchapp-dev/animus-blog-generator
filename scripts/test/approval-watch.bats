@@ -51,10 +51,13 @@ FAKE
   export PATH="$WORK/bin:$PATH"
 }
 
-# helper: write a subject-list envelope from compact subject JSONs
+# helper: write a subject-list envelope from compact subject JSONs.
+# Mirrors the REAL CLI shape: subjects at .data.result.subjects, cursor at
+# .data.result.next_cursor. Optional 2nd arg sets next_cursor (default null).
 write_list() {
-  local subjects="$1"
-  printf '{"schema":"animus.cli.v1","ok":true,"data":%s}' "$subjects" > "$FIXTURE_LIST"
+  local subjects="$1" cursor="${2:-null}"
+  printf '{"schema":"animus.cli.v1","ok":true,"data":{"kind":"issue","verb":"list","method":"issue/list","plugin_count":1,"result":{"next_cursor":%s,"subjects":%s}}}' \
+    "$cursor" "$subjects" > "$FIXTURE_LIST"
 }
 
 enqueue_count() { grep -c "queue enqueue" "$CALL_LOG" || true; }
@@ -241,4 +244,23 @@ state_file() { echo "$WORK/.animus/state/approval-seen.json"; }
   [ "$status" -eq 0 ]
   run jq -r '.subjects["BLG-7"].last_status' "$(state_file)"
   [ "$output" = "blocked" ]
+}
+
+# 21 — real envelope shape: a non-null next_cursor (more than one page) fails loud
+@test "next_cursor present fails closed (no silent truncation)" {
+  write_list '[{"subject_id":"BLG-1","title":"A","status":"in-progress","project_id":"PROJ-1"}]' '"CURSOR123"'
+  run bash "$SCRIPT"
+  [ "$status" -ne 0 ]
+  [ "$(enqueue_count)" -eq 0 ]
+}
+
+# 22 — regression: subjects are read from .data.result.subjects, not .data[]
+@test "ignores wrapper fields and reads .data.result.subjects" {
+  # An empty subjects array under the real wrapper must yield no_approvals,
+  # proving the script does not iterate wrapper keys (kind/verb/method/...).
+  write_list '[]'
+  run bash "$SCRIPT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *'"reason":"no_approvals"'* ]]
+  [ "$(enqueue_count)" -eq 0 ]
 }

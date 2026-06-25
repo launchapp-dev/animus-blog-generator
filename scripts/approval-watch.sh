@@ -22,7 +22,7 @@ set -euo pipefail
 STATE_DIR=".animus/state"
 STATE="$STATE_DIR/approval-seen.json"
 LOCK="$STATE_DIR/approval-watch.lock"
-LIST_LIMIT="${APPROVAL_WATCH_LIST_LIMIT:-500}"
+LIST_LIMIT="${APPROVAL_WATCH_LIST_LIMIT:-250}"   # Linear caps `first` at 250
 
 die() { echo "approval-watch: $*" >&2; exit 1; }
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
@@ -72,9 +72,14 @@ resp=$(animus subject list --kind issue --limit "$LIST_LIMIT" --json) || true
 if [ "$(jq -r '.ok // false' <<<"$resp" 2>/dev/null || echo false)" != "true" ]; then
   die "subject list failed: $(jq -r '.error.code // "unknown"' <<<"$resp" 2>/dev/null || echo unknown)"
 fi
-count=$(jq '.data // [] | length' <<<"$resp")
-if [ "$count" -ge "$LIST_LIMIT" ]; then
-  die "subject list returned $count >= limit $LIST_LIMIT — pagination required (resolve in smoke test before enabling)"
+# Subjects live at .data.result.subjects; the page cursor at .data.result.next_cursor.
+# The Linear backend pages (clamped to 100, Linear max 250) and the generic
+# `subject list` CLI cannot pass a cursor, so if a second page exists we fail
+# loud rather than silently miss approvals. Server-side project scoping keeps the
+# discovery set well under one page in practice.
+next_cursor=$(jq -r '.data.result.next_cursor // empty' <<<"$resp")
+if [ -n "$next_cursor" ]; then
+  die "subject list returned a next_cursor — more than one page; narrow project scope or add plugin-call pagination before enabling"
 fi
 
 # enqueue one subject; sets global ENQ_OK=1 on success. Tries the sqlite blogtask
@@ -164,7 +169,7 @@ while IFS= read -r s; do
     echo "approval-watch: enqueue failed for $id" >&2
     fail=1
   fi
-done < <(jq -c '.data[]?' <<<"$resp")
+done < <(jq -c '.data.result.subjects[]?' <<<"$resp")
 
 # --- 6. end-of-run persist (captures non-in-progress last_status observations) ---
 STATE_JSON=$(jq -c --arg now "$(now)" '.updated_at=$now' <<<"$STATE_JSON")

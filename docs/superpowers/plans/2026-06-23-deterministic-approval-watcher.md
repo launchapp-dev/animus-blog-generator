@@ -4,7 +4,11 @@
   **Status:** Ready to implement (gated on a live-Linear smoke test before enabling the schedule)
   **Revision:** rev. 2 — incorporates external review: two-phase state write, fail-closed project scoping, list pagination, `--task-id` enqueue-rejection fallback, fail-closed on unknown state version, required live-doc fixes.
 **Revision:** rev. 3 — smoke test mirrors the script's fetch (`--limit 500 --json` + truncation check); the ad-hoc enqueue fallback is envelope-aware (`--json` + `.ok`).
-  **Verified against:** Animus CLI `0.5.21`, `animus-subject-linear` `0.1.8`.
+**Revision:** rev. 4 — post-implementation review (verified against the live CLI + plugin source) found three contract mismatches, now resolved:
+  (P0) real list shape is `.data.result.subjects` (not `.data[]`) — script + bats fake CLI fixed, regression tests added;
+  (P0) the Linear plugin did not scope `list` by project — fixed in the official **v0.1.9** release (`build_issue_filter` now applies the configured project filter; installed + `sha256_verified`), so `APPROVAL_WATCH_ASSUME_BACKEND_PROJECT_SCOPED=1` is now correct;
+  (P1) Linear clamps `first` to ≤250 and the generic CLI has no cursor flag — limit set to 250 and the script fails loud on a non-null `next_cursor` (true cursor pagination via `plugin call` deferred until a discovery project exceeds one page).
+  **Verified against:** Animus CLI `0.5.21`, `animus-subject-linear` `0.1.9`.
 
   ## Goal
 
