@@ -40,10 +40,10 @@ The blog generator ships with **11 MCP servers** that give agents access to sear
 
 | Server | Package | What It Does |
 |--------|---------|--------------|
-| **Krisp** | (in workflow YAML) | Audio transcript ingest — source for the idea-discovery pipeline |
+| **Transcript Source** | (in workflow YAML, BYO) | Transcript ingest — the single active provider (Krisp or Granola) for the idea-discovery pipeline. Selected by `TRANSCRIPT_PROVIDER`. |
 | **Content Library** | (in workflow YAML, BYO) | Org "knowledge brain" — deep drafting context (prior research, established facts, brand positions, angles already used) so agents write unique, high-quality content; also dedup + internal-link slugs. Bring your own content MCP. |
 
-> Both ship as no-op stubs (`command: "true"`, macOS). Krisp gates the discovery half. **content-library is a bring-your-own extension point** — wire your own content MCP to give agents a knowledge brain. Until then it is a no-op stub and every agent that uses it falls back to `content/manifest.json` + research (the prompts say "do not block"), so the pipeline runs without it.
+> Both ship as no-op stubs (`command: "true"`, macOS). The transcript-source gates the discovery half — wire your provider's MCP (Krisp or Granola) and set `TRANSCRIPT_PROVIDER` to match. **content-library is a bring-your-own extension point** — wire your own content MCP to give agents a knowledge brain. Until then it is a no-op stub and every agent that uses it falls back to `content/manifest.json` + research (the prompts say "do not block"), so the pipeline runs without it.
 
 ## Subject Backends
 
@@ -67,7 +67,7 @@ SEO Optimizer        → search-console, firecrawl, content-library
 Asset Generator      → replicate
 Performance Analyst  → animus, search-console, exa, perplexity
 Content Refresher    → firecrawl, content-library
-Transcript Collector → krisp
+Transcript Collector → transcript-source
 Idea Strategist      → animus, content-library, search-console, exa, tavily, brave, firecrawl
 Approval Watcher     → animus
 Linear Coordinator   → animus

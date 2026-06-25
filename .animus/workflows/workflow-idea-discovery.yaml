@@ -1,25 +1,39 @@
-# idea-discovery — poll Krisp transcripts, file blog ideas as Linear issues.
+# idea-discovery — poll the configured transcript provider, file blog ideas as
+# Linear issues. Provider (Krisp or Granola) is selected by the transcript-source
+# MCP wiring and declared canonically by TRANSCRIPT_PROVIDER.
 phases:
   transcript-fetch:
     mode: agent
     agent: transcript-collector
     directive: |
-      Read .animus/state/discovery-cursor.json. Use cursor.last_processed_at as
-      the timestamp cutoff. If the cursor file is missing, treat as null and
-      cap fetch at 20.
+      Provider: TRANSCRIPT_PROVIDER (krisp|granola) is the canonical active
+      provider and MUST match the wired transcript-source MCP.
+
+      Read .animus/state/discovery-cursor.json. PROVIDER GUARD: if the cursor
+      exists and cursor.provider is present and != TRANSCRIPT_PROVIDER, emit
+      skip with reason "provider_changed_reset_cursor_required" and do nothing
+      else (an operator must delete/migrate the cursor first — a stale
+      cross-provider timestamp cutoff is unsafe).
+
+      Otherwise use cursor.last_processed_at as the timestamp cutoff. If the
+      cursor file is missing, treat as null and cap fetch at 20.
 
       mkdir -p .animus/state/transcripts
 
-      List Krisp transcripts created strictly after the cutoff. For each (in
-      chronological order):
-        - Fetch full text + metadata (id, created_at, participants,
+      List transcripts from the configured provider created strictly after the
+      cutoff. For each (in chronological order):
+        - Fetch full text + metadata (raw provider id, created_at, participants,
           duration_secs, title)
+        - Namespace the id as "<TRANSCRIPT_PROVIDER>:<raw provider id>" so ids
+          never collide across providers.
         - If the provider exposes timestamped transcript segments, include
           segments as:
           [{ "start":"HH:MM:SS", "end":"HH:MM:SS", "speaker":"...",
              "text":"..." }]
-        - Write to .animus/state/transcripts/<id>.json with:
-          { "id":"...", "created_at":"<ISO8601>", "participants":[...],
+        - Derive a filesystem-safe filename by replacing ":" with "__", and
+          write to .animus/state/transcripts/<safe id>.json with:
+          { "id":"<provider>:<raw id>", "raw_provider_id":"<raw id>",
+            "created_at":"<ISO8601>", "participants":[...],
             "duration_secs":N, "title":"...", "text":"...",
             "segments":[...] }
 
@@ -90,8 +104,10 @@ phases:
                 LINEAR_API_TOKEN + LINEAR_DISCOVERY_PROJECT_ID in the daemon env.
         f. AFTER all surviving angles for this transcript are
            created-or-confirmed-duplicate, atomically write
-           .animus/state/discovery-cursor.json:
-             { "last_processed_id":"<transcript id>",
+           .animus/state/discovery-cursor.json (transcript_id is the namespaced
+           "<provider>:<raw id>" from the staged file's id):
+             { "provider":"<TRANSCRIPT_PROVIDER>",
+               "last_processed_id":"<transcript id>",
                "last_processed_at":"<transcript created_at>",
                "updated_at":"<current ISO8601>" }
 
@@ -115,7 +131,7 @@ phases:
 workflows:
 - id: idea-discovery
   name: Transcript-Driven Idea Discovery
-  description: Poll Krisp transcripts and propose blog ideas as Linear-backed subjects
+  description: Poll the configured transcript provider and propose blog ideas as Linear-backed subjects
   phases:
   - transcript-fetch
   - idea-strategist
@@ -123,6 +139,6 @@ schedules:
 - id: discovery
   cron: "0 7 * * *"
   workflow_ref: idea-discovery
-  # Disabled until Krisp + Linear secrets are configured in .env (placeholders
-  # are in .env.example). Flip to true once the backend is live.
+  # Disabled until the transcript provider + Linear secrets are configured in
+  # .env (placeholders are in .env.example). Flip to true once the backend is live.
   enabled: false

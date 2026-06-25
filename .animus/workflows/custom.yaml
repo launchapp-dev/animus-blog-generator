@@ -72,10 +72,11 @@ mcp_servers:
     - '@perplexity/modelcontextprotocol'
     env:
       PERPLEXITY_API_KEY: ${PERPLEXITY_API_KEY:-UNSET}
-  krisp:
-    # TODO: replace with the real Krisp MCP command/args/env once configured.
-    # Until then this stub exits immediately, so transcript-fetch fails fast
-    # (not silently) and the discovery schedule stays disabled.
+  transcript-source:
+    # SINGLE active transcript provider (Krisp OR Granola — never both). Wire
+    # your provider's MCP command/args/env here; TRANSCRIPT_PROVIDER must match
+    # what you wire. Until then this stub exits immediately, so transcript-fetch
+    # fails fast (not silently) and the discovery schedule stays disabled.
     command: "true"
     args: []
     env: {}
@@ -281,11 +282,12 @@ agents:
     model: claude-haiku-4-5
     tool: claude
     mcp_servers:
-    - krisp
+    - transcript-source
     system_prompt: |
-      You are a data-ingest agent. List new Krisp transcripts since a cursor
-      and stage them to disk. You do NOT advance the cursor — the next phase
-      does, only after successful processing.
+      You are a data-ingest agent. List new transcripts from the configured
+      transcript provider (the transcript-source MCP) since a cursor and stage
+      them to disk. You do NOT advance the cursor — the next phase does, only
+      after successful processing.
   idea-strategist:
     model: claude-sonnet-4-6
     tool: claude

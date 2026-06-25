@@ -155,7 +155,7 @@ All agents read `business-context.yaml` for your business details, brand voice, 
 
 In addition to the cron-driven `blog-production` pipeline, this generator supports a transcript-driven discovery loop with a human-review gate in Linear (integrated as an Animus subject backend).
 
-**Daily 7am — `idea-discovery`.** Polls Krisp for new transcripts. The strategist proposes 3–5 angles per transcript, each pre-validated with Search Console + competitor scan + spot-scraped citable sources. Surviving angles become Linear issues (Animus subjects) at status `ready`.
+**Daily 7am — `idea-discovery`.** Polls the configured transcript provider (Krisp or Granola) for new transcripts. The strategist proposes 3–5 angles per transcript, each pre-validated with Search Console + competitor scan + spot-scraped citable sources. Surviving angles become Linear issues (Animus subjects) at status `ready`.
 
 **Every 15 min — `approval-watch`.** Polls Linear-backed subjects for `status == in-progress` (the human-approval signal) and dispatches each newly-approved subject to `blog-from-ticket` via the queue (carrying `linear_subject_id`). Cancelled/Done/Blocked are filtered out. The gate is a deterministic script (`scripts/approval-watch.sh`), not an LLM — dedup is exact and a no-op poll costs no tokens.
 
@@ -184,7 +184,7 @@ animus daemon start --autonomous
 
 ### Required `.env` values (placeholders are in `.env.example`)
 
-- `KRISP_API_KEY`
+- `TRANSCRIPT_PROVIDER` (`krisp` or `granola`) + the matching key (`KRISP_API_KEY` *or* `GRANOLA_API_KEY`)
 - `LINEAR_API_TOKEN`, `LINEAR_TEAM_ID`, `LINEAR_DISCOVERY_PROJECT_ID`
 - `CONTENT_LIBRARY_URL`, `CONTENT_LIBRARY_TOKEN`
 - `ANIMUS_SQLITE_KINDS=blogtask`
@@ -196,7 +196,7 @@ The `discovery` and `approval-watch` schedules ship **disabled** — flip them t
 ### State
 
 Gitignored runtime state (`.animus/state/`):
-- `discovery-cursor.json` — last *processed* Krisp transcript
+- `discovery-cursor.json` — last *processed* transcript (+ active `provider`)
 - `approval-seen.json` — already-enqueued Linear subject IDs
 - `transcripts/<id>.json` — staged transcripts
 
