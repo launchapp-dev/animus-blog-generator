@@ -64,6 +64,7 @@ workflows:
   - social-excerpts
   - register-post
   - push-branch
+  - publish-post
 schedules:
 # Content schedules ship DISABLED on a fresh clone: they call external MCPs
 # (search-console, exa, firecrawl, replicate, ...) that need real keys in the

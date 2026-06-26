@@ -113,7 +113,9 @@ The pipeline runs as a series of **workflows**, each made up of **phases** execu
 ```
 topic-research ─→ research-collection ─→ content-writing ─→ commit-draft
                                                                 │
-    push-branch ←── social-excerpts ←── asset-generation ←── seo-review
+       seo-review ─→ asset-generation ─→ social-excerpts ─→ register-post
+                                                                │
+                                       publish-post ←──────── push-branch
 ```
 
 | Phase | Agent | What it does |
@@ -125,7 +127,9 @@ topic-research ─→ research-collection ─→ content-writing ─→ commit-d
 | **seo-review** | seo-optimizer | Audits and fixes SEO issues in-place — keyword density, meta tags, internal links, readability, AI cliche removal |
 | **asset-generation** | asset-generator | Generates a featured image via Replicate (Nano Banana Pro) and updates the post frontmatter |
 | **social-excerpts** | asset-generator | Creates platform-specific social media content (Instagram, Facebook, LinkedIn) |
+| **register-post** | (command) | Appends the post to `content/manifest.json` (dedup index + internal-link slugs) |
 | **push-branch** | (command) | Pushes the branch to origin |
+| **publish-post** | (command) | *Optional.* Upserts the finished post into a database (Supabase/PostgREST by default). Skips unless configured; git stays the source of truth. See [publish targets](docs/integrations/publish-targets/README.md) |
 
 ### Other Workflows
 
@@ -195,7 +199,7 @@ animus daemon start --autonomous
 - `CONTENT_LIBRARY_URL`, `CONTENT_LIBRARY_TOKEN`
 - `ANIMUS_SQLITE_KINDS=blogtask`
 
-Optional: `LINEAR_STATUS_MAP`, `LINEAR_FINALIZE_TRANSITION=done`.
+Optional: `LINEAR_STATUS_MAP`, `LINEAR_FINALIZE_TRANSITION=done`. To publish finished posts to a database, also set `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (+ optional `PUBLISH_TABLE`) — see [publish targets](docs/integrations/publish-targets/README.md); unset = publishing skipped.
 
 The `discovery` and `approval-watch` schedules ship **disabled** — flip them to `enabled: true` in `.animus/workflows/custom.yaml` once the secrets above are set and the daemon has been restarted.
 

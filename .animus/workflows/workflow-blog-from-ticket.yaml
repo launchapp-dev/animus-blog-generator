@@ -143,4 +143,5 @@ workflows:
   - social-excerpts
   - register-post
   - push-branch
+  - publish-post
   - linear-finalize

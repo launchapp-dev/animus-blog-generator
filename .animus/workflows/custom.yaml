@@ -573,3 +573,17 @@ phases:
           type: string
         linear_subject_id:
           type: string
+  publish-post:
+    # Deterministic DB publish target. Runs AFTER push-branch (git stays the
+    # source of truth); the script self-discovers the slug from the manifest
+    # entry register-post just wrote, so no arg threading is needed. Opt-in:
+    # skips cleanly unless SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY are set in
+    # the daemon env. SWAPPABLE — edit scripts/publish-post.sh for another
+    # backend/table. See docs/integrations/publish-targets/.
+    mode: command
+    directive: Upsert the published post into the configured database (scripts/publish-post.sh; skips if unconfigured)
+    command:
+      program: bash
+      args: [scripts/publish-post.sh]
+      cwd_mode: task_root
+      timeout_secs: 60
