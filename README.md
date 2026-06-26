@@ -1,6 +1,6 @@
 # Animus Blog Generator
 
-An automated blog generation pipeline powered by [Animus](https://github.com/launchapp-dev/ao-cli). It uses multiple AI agents working in sequence to research topics, write SEO-optimized posts, generate images, and create social media excerpts — all on autopilot.
+An automated blog generation pipeline powered by [Animus](https://github.com/launchapp-dev/animus-cli). It uses multiple AI agents working in sequence to research topics, write SEO-optimized posts, generate images, and create social media excerpts — all on autopilot.
 
 You configure it once for your business niche, and it handles the rest: finding topics worth writing about, collecting research, writing with your brand voice, optimizing for search engines and AI citations, and generating platform-specific social content.
 
@@ -83,24 +83,19 @@ phases:
       Create platform-specific social content for Instagram,
       Facebook, and LinkedIn.
 
+# Workflows + schedules live in per-workflow files (workflow-*.yaml), e.g.:
 workflows:
   - id: blog-production
     phases: [topic-research, research-collection, content-writing,
              commit-draft, seo-review, asset-generation, social-excerpts,
-             push-branch]
-
-  - id: refresh-cycle
-    phases: [performance-analysis, content-refresh-write,
-             refresh-seo-review, push-branch]
+             register-post, push-branch, publish-post]
 
 schedules:
-  - { id: blog-tue, cron: "0 8 * * 2", workflow_ref: blog-production }
-  - { id: blog-thu, cron: "0 8 * * 4", workflow_ref: blog-production }
-  - { id: refresh,  cron: "0 8 * * 3", workflow_ref: refresh-cycle }
-  - { id: news,     cron: "0 6 * * *", workflow_ref: news-monitor }
+  - { id: blog-primary, cron: "0 8 * * 2", workflow_ref: blog-production,
+      enabled: false }   # all schedules ship disabled
 ```
 
-See the full workflow definition in [`.animus/workflows/custom.yaml`](.animus/workflows/custom.yaml).
+This preview is abridged. The real config is **split**: `custom.yaml` holds shared base config, `mcp_servers`, `subjects`, agents, and shared phases; each workflow (and its schedule) lives in its own [`.animus/workflows/workflow-*.yaml`](.animus/workflows/).
 
 </details>
 
@@ -127,7 +122,7 @@ topic-research ─→ research-collection ─→ content-writing ─→ commit-d
 | **seo-review** | seo-optimizer | Audits and fixes SEO issues in-place — keyword density, meta tags, internal links, readability, AI cliche removal |
 | **asset-generation** | asset-generator | Generates a featured image via Replicate (Nano Banana Pro) and updates the post frontmatter |
 | **social-excerpts** | asset-generator | Creates platform-specific social media content (Instagram, Facebook, LinkedIn) |
-| **register-post** | (command) | Appends the post to `content/manifest.json` (dedup index + internal-link slugs) |
+| **register-post** | register-post-runner (agent) | Runs `scripts/register-post.sh` to append the post to `content/manifest.json` (dedup index + internal-link slugs) |
 | **push-branch** | (command) | Pushes the branch to origin |
 | **publish-post** | (command) | *Optional.* Upserts the finished post into a database (Supabase/PostgREST by default). Skips unless configured; git stays the source of truth. See [publish targets](docs/integrations/publish-targets/README.md) |
 
@@ -141,19 +136,19 @@ topic-research ─→ research-collection ─→ content-writing ─→ commit-d
 
 ### Agent Architecture
 
-Each agent is a Claude instance with a focused role:
+Each agent is a Claude instance with a focused role. These are the **core content-pipeline** agents; the discovery flow adds more (transcript-collector, idea-strategist, approval-watcher, linear-coordinator, register-post-runner) — the full agent→MCP map is in [MCP-TOOLS.md](MCP-TOOLS.md).
 
 | Agent | Model | Role | Tools |
 |-------|-------|------|-------|
-| content-strategist | Sonnet 4.6 | Topic selection and content planning | Exa, Tavily, Brave, Firecrawl, Search Console |
-| content-researcher | Sonnet 4.6 | Data collection and source gathering | Firecrawl, Exa, Tavily, Brave, Google Maps |
-| content-writer | Opus 4.6 | Long-form content writing | None (pure writing) |
-| seo-optimizer | Sonnet 4.6 | SEO auditing and fixing | Search Console, Firecrawl |
+| content-strategist | Sonnet 4.6 | Topic selection and content planning | Animus, Exa, Tavily, Brave, Firecrawl, Search Console, Content Library |
+| content-researcher | Sonnet 4.6 | Data collection and source gathering | Firecrawl, Exa, Tavily, Brave, Google Maps, Content Library |
+| content-writer | Opus 4.6 | Long-form content writing | Content Library |
+| seo-optimizer | Sonnet 4.6 | SEO auditing and fixing | Search Console, Firecrawl, Content Library |
 | asset-generator | Sonnet 4.6 | Image generation and social content | Replicate |
-| performance-analyst | Sonnet 4.6 | Content performance analysis | Search Console, Exa, Perplexity |
-| content-refresher | Opus 4.6 | Updating existing content | Firecrawl |
+| performance-analyst | Sonnet 4.6 | Content performance analysis | Animus, Search Console, Exa, Perplexity |
+| content-refresher | Opus 4.6 | Updating existing content | Firecrawl, Content Library |
 
-All agents read `business-context.yaml` for your business details, brand voice, and content strategy. The content-writing agents also follow skill files in `.animus/skills/` that encode best practices for content production, SEO, humanization, and social media.
+All **content** agents read `business-context.yaml` for your business details, brand voice, and content strategy (the data-plumbing agents — transcript-collector, approval-watcher, linear-coordinator, register-post-runner — do not). The content-writing agents also follow skill files in `.animus/skills/` that encode best practices for content production, SEO, humanization, and social media.
 
 ## Discovery Flow (transcript-driven)
 
@@ -165,7 +160,7 @@ In addition to the cron-driven `blog-production` pipeline, this generator suppor
 
 **Per approved ticket — `blog-from-ticket`.** A variant of blog-production using the Linear ticket as the topic brief. `ticket-acknowledge` and `ticket-to-brief` both re-check the subject's status; if the human cancelled after approval, the run aborts cleanly. `register-post` runs before `push-branch` so the manifest commit ships with the push. The last phase posts a completion comment; status transition is opt-in via `LINEAR_FINALIZE_TRANSITION=done`.
 
-**Authoritative-lifecycle invariant.** Linear is the single source of truth for lifecycle. The local SQLite `blogtask` wrapper is a subordinate, reference-only dispatch log — no phase reads its status; only `linear-finalize` writes back.
+**Authoritative-lifecycle invariant.** Linear is the single source of truth for lifecycle. The local SQLite `blogtask` wrapper — created by `scripts/approval-watch.sh` purely as a dispatch log — is subordinate and reference-only: no phase reads its status, and lifecycle is written back only to Linear (by `linear-finalize`).
 
 ### Transcript provider (Krisp or Granola)
 
@@ -201,7 +196,7 @@ animus daemon start --autonomous
 
 Optional: `LINEAR_STATUS_MAP`, `LINEAR_FINALIZE_TRANSITION=done`. To publish finished posts to a database, also set `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (+ optional `PUBLISH_TABLE`) — see [publish targets](docs/integrations/publish-targets/README.md); unset = publishing skipped.
 
-The `discovery` and `approval-watch` schedules ship **disabled** — flip them to `enabled: true` in `.animus/workflows/custom.yaml` once the secrets above are set and the daemon has been restarted.
+The `discovery` and `approval-watch` schedules ship **disabled** — flip them to `enabled: true` in their files (`.animus/workflows/workflow-idea-discovery.yaml` and `workflow-approval-watch.yaml`) once the secrets above are set and the daemon has been restarted.
 
 ### State
 
@@ -214,7 +209,7 @@ Tracked in repo (`content/manifest.json`): the canonical list of every post this
 
 ## Prerequisites
 
-- **[Animus CLI](https://github.com/launchapp-dev/ao-cli)** — Install the Animus command-line tool
+- **[Animus CLI](https://github.com/launchapp-dev/animus-cli)** — Install the Animus command-line tool
 - **Node.js 18+** — Required for MCP servers (installed via npx)
 - **Git** — For version control of generated content
 - **API keys** — At least one search API (Exa, Tavily, or Brave). See [API Keys](#api-keys) below.
@@ -224,57 +219,69 @@ Tracked in repo (`content/manifest.json`): the canonical list of every post this
 ### 1. Clone the repo
 
 ```bash
-git clone https://github.com/your-org/animus-blog-generator.git
+git clone https://github.com/launchapp-dev/animus-blog-generator.git
 cd animus-blog-generator
 ```
 
-### 2. Set up API keys
+### 2. Install Animus plugins (one-time)
+
+The daemon needs provider, queue, and workflow-runner plugins. The discovery flow additionally needs the Linear subject backend.
+
+```bash
+animus plugin install-defaults                              # providers + queue + runner
+animus plugin install launchapp-dev/animus-subject-linear   # only for the discovery flow
+animus daemon preflight                                     # verifies required roles are satisfied
+```
+
+### 3. Configure secrets
 
 ```bash
 cp .env.example .env
-# Edit .env and add your API keys
+# Edit .env — at minimum one search key (EXA / TAVILY / BRAVE).
+# See "Required .env values" above for the full set.
 ```
 
-### 3. Run the setup wizard
+### 4. Create your business context
 
-The setup wizard walks you through configuring the pipeline for your business. It asks about your niche, audience, brand voice, competitors, and content pillars, then generates `business-context.yaml`.
+The pipeline reads `business-context.yaml` (niche, audience, brand voice, pillars) on every run. Create it manually — see [Business Context](#business-context) below — or ask Claude Code to run the **setup-wizard** skill, which generates it interactively. (There is no `workflow run setup`; the wizard is a skill, not a workflow.)
+
+### 5. Start the daemon
+
+The daemon does **not** auto-load `.env`, so source it into the daemon's shell first; `ANIMUS_SQLITE_KINDS=blogtask` must be present too (see [Daemon environment](#daemon-environment-env-is-not-auto-loaded)).
 
 ```bash
-ao workflow run setup
+set -a; source .env; set +a
+animus daemon start --autonomous
 ```
 
-Or if you prefer, create `business-context.yaml` manually — see [Business Context](#business-context) below.
-
-### 4. Run your first blog post
+### 6. Run your first blog post
 
 ```bash
-ao workflow run blog-production
+animus workflow run blog-production
 ```
 
-This kicks off the full pipeline. The first run typically takes 15-30 minutes as agents research, write, optimize, and generate assets. Output lands in `content/` and `assets/`.
+The first run typically takes 15–30 minutes as agents research, write, optimize, and generate assets. Output lands in `content/` and `assets/` and is committed/pushed to a branch.
 
-### 5. Set up scheduled runs (optional)
+### 7. Enable scheduled runs (optional)
 
-The pipeline includes default schedules in `.animus/workflows/custom.yaml`:
-
-- **Tuesday 8am** — Blog production
-- **Wednesday 8am** — Refresh cycle
-- **Thursday 8am** — Blog production
-- **Daily 6am** — News monitoring
-
-Start the Animus daemon to enable scheduled runs:
+**All schedules ship disabled.** To automate runs, flip `enabled: true` on the schedule in the relevant `.animus/workflows/*.yaml`, then persist the config (the running daemon also hot-reloads YAML edits):
 
 ```bash
-ao daemon start
+animus workflow config compile
 ```
 
-Edit the `schedules` section in `custom.yaml` to adjust timing and pillar preferences.
+Default (currently disabled) schedules:
+
+- **`blog-primary`** — Tue 8am · **`blog-secondary`** — Thu 8am → `blog-production`
+- **`refresh`** — Wed 8am → `refresh-cycle`
+- **`news`** — daily 6am → `news-monitor`
+- **`discovery`** — daily 7am · **`approval-watch`** — every 15 min → discovery flow (also needs Linear + transcript secrets)
 
 ## Configuration
 
 # MCP Tools
 
-The blog generator ships with **9 MCP servers** that give agents access to search, scraping, analytics, image generation, and self-orchestration.
+The blog generator ships with **9 core content-pipeline MCP servers** that give agents access to search, scraping, analytics, image generation, and self-orchestration. The discovery flow adds two more bring-your-own servers — `transcript-source` and `content-library` — covered under [Discovery Flow](#discovery-flow-transcript-driven).
 
 ## Search & Discovery
 
@@ -308,30 +315,32 @@ The blog generator ships with **9 MCP servers** that give agents access to searc
 
 | Server | Package | What It Does |
 |--------|---------|--------------|
-| **ao** | `ao mcp serve` | Animus self-management — task creation, queue management, lets agents schedule follow-up work |
+| **animus** | `animus mcp serve` | Animus self-management — task creation, queue management, lets agents schedule follow-up work |
 
 ## Which Agents Use What
 
+Core content pipeline (the discovery-flow agents — transcript-collector, idea-strategist, approval-watcher — are covered under [Discovery Flow](#discovery-flow-transcript-driven); the full map is in [MCP-TOOLS.md](MCP-TOOLS.md)):
+
 ```
-Strategist        → ao, exa, tavily, brave, firecrawl, search-console
-Researcher        → firecrawl, exa, tavily, brave, google-maps
-Writer            → (none — pure writing)
-SEO Optimizer     → search-console, firecrawl
-Asset Generator   → replicate
-Performance Analyst → ao, search-console, exa, perplexity
-Content Refresher → firecrawl
+Strategist          → animus, exa, tavily, brave, firecrawl, search-console, content-library
+Researcher          → firecrawl, exa, tavily, brave, google-maps, content-library
+Writer              → content-library
+SEO Optimizer       → search-console, firecrawl, content-library
+Asset Generator     → replicate
+Performance Analyst → animus, search-console, exa, perplexity
+Content Refresher   → firecrawl, content-library
 ```
 
-## Bring Your Own CMS
+## Publishing to a database
 
-There's a commented-out slot in `custom.yaml` for a publishing MCP server. Plug in your blog's API to go from "push branch" to "live on site" automatically.
+The pipeline writes posts as markdown to git (the source of truth). To also upsert each finished post into a database, the optional **`publish-post`** phase ships built in (Supabase/PostgREST by default, swappable). Set `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` to enable it — see [publish targets](docs/integrations/publish-targets/README.md). It skips cleanly when unconfigured.
 
 
-The pipeline degrades gracefully — if you don't have Search Console configured, the topic-research phase relies more on web search. If you don't have Replicate, skip the image generation phase.
+Agents degrade gracefully on missing *optional* tools — without Search Console, `topic-research` leans more on web search. Note that `asset-generation` (Replicate) is a **required** phase in `blog-production`: if you don't have a Replicate token, remove that phase from the workflow rather than expecting it to be skipped automatically.
 
 ### Business Context
 
-`business-context.yaml` is the central configuration file. All agents read it. It defines:
+`business-context.yaml` is the central configuration file. Every content agent reads it. It defines:
 
 ```yaml
 business:
@@ -366,16 +375,11 @@ content:
   social_platforms: ["Instagram", "Facebook", "LinkedIn"]
 ```
 
-Run the setup wizard (`ao workflow run setup`) to generate this interactively, or create it manually.
+Create it manually, or ask Claude Code to run the **setup-wizard** skill, which generates it interactively. (`setup-wizard` is a skill, not a `workflow run setup` target.)
 
-### Publishing to Your CMS
+### Publishing to a database or CMS
 
-The pipeline generates content as local markdown files and pushes to git. To publish directly to your CMS:
-
-1. Create an MCP server that exposes publishing tools (see [Animus MCP docs](https://github.com/launchapp-dev/ao-cli))
-2. Add it to the `mcp_servers` section in `.animus/workflows/custom.yaml`
-3. Uncomment the `publish` phase in the workflow definitions
-4. Add the MCP server to the `asset-generator` agent's `mcp_servers` list
+The pipeline writes posts as markdown to git (the source of truth) and, optionally, upserts each finished post into a database via the built-in **`publish-post`** phase (Supabase/PostgREST by default). To enable or retarget it, see [publish targets](docs/integrations/publish-targets/README.md). To push to a CMS instead, point `scripts/publish-post.sh`'s two seams (`build_payload()` + `publish()`) at your CMS's API.
 
 ## Project Structure
 
@@ -391,9 +395,16 @@ animus-blog-generator/
 │   │   ├── seo-audit.md              # SEO audit checklist
 │   │   ├── schema-markup.md          # Structured data guide
 │   │   └── social-content.md         # Social media content guide
-│   └── workflows/
-│       ├── custom.yaml                # Main pipeline definition
-│       └── standard-workflow.yaml     # Animus default workflow
+│   └── workflows/                     # Config is split across these files
+│       ├── custom.yaml                # Shared base config, mcp_servers, subjects, agents, shared phases
+│       ├── workflow-blog-production.yaml
+│       ├── workflow-blog-from-ticket.yaml
+│       ├── workflow-idea-discovery.yaml
+│       ├── workflow-news-monitor.yaml
+│       ├── workflow-refresh-cycle.yaml
+│       ├── workflow-image-refresh.yaml
+│       └── workflow-approval-watch.yaml
+├── scripts/                           # approval-watch.sh, register-post.sh, publish-post.sh (+ bats tests)
 ├── content/                           # Generated blog posts (.md)
 ├── assets/                            # Generated images (.webp)
 ├── business-context.yaml              # Your business config (generated by setup wizard)
@@ -406,7 +417,7 @@ animus-blog-generator/
 
 ## Skills
 
-Skills are markdown files that encode domain expertise. Agents reference them in their system prompts. They come from the [Animus marketing skills library](https://github.com/launchapp-dev/ao-cli) and can be customized.
+Skills are markdown files that encode domain expertise. Agents reference them in their system prompts. They come from the [Animus marketing skills library](https://github.com/launchapp-dev/animus-cli) and can be customized.
 
 | Skill | What it teaches the agent |
 |-------|--------------------------|
@@ -434,7 +445,7 @@ Edit `.animus/workflows/custom.yaml` to:
 After editing, always run:
 
 ```bash
-ao workflow config compile
+animus workflow config compile
 ```
 
 ### Customize agent behavior

@@ -2,7 +2,7 @@
 # Globals, MCP servers, subjects, all agents, and the SHARED content-pipeline
 # phases. Per-workflow phases + workflow defs + schedules live in workflow-*.yaml.
 # All .animus/workflows/*.yaml compile together (animus workflow config compile).
-default_workflow_ref: standard-workflow
+default_workflow_ref: blog-production
 tools_allowlist:
 - git
 - gh
